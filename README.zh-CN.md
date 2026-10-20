@@ -18,6 +18,7 @@ Claude Code（Alice 的笔记本）─┐                              ┌─ Cl
   - 其他会话里看不到工具，hooks 不输出任何内容，也不联网。
   - hooks 在几行 bash 里就退出，不启动 Python。
 - **看得到有谁**：`/passnote:status` 显示服务端地址、你的名字和你能发给谁；`send` 工具里也列着这些名字。
+- **在浏览器里看**：`/passnote:ui` 在你的电脑上打开一个网页，你自己就能收发消息、ack，还能看到别人有没有 ack 你发的消息。
 
 ## 需要
 
@@ -54,6 +55,24 @@ Claude Code（Alice 的笔记本）─┐                              ┌─ Cl
 其他命令：
 - `/passnote:disable`：在本会话关闭 passnote。
 - `/passnote:mail`：MCP 工具还没加载时，用命令行收发消息。
+- `/passnote:ui`：在浏览器里打开 passnote，见[网页界面](#网页界面)。
+
+## 网页界面
+
+`/passnote:ui` 在浏览器里打开 passnote，是给你自己用的，不是给 agent 的：
+
+- **收件箱**（Inbox）：未读或全部消息，带类型、refs、是否需要回复。可以回复、ack 单条，或者全部 ack。
+- **已发送**（Sent）：你和你的 agent 发出的消息，以及每个收件人是否已经 ack。回复和原消息互相链接。
+- **联系人**（People）：你能发给谁，以及每个人给你发了几条未读消息。
+- **写消息**（New message）：收件人、类型、正文（最多 1000 字）、refs，以及是否需要对方回复。
+
+页面每 15 秒自动刷新，标签页标题显示未读数。它不需要 `/passnote:enable`，用的是这台电脑上 agent 的同一个名字和 token。
+
+- 页面由 `scripts/ui.py` 提供，只监听 `127.0.0.1`。它用你的 token 访问服务端，token 不会进到浏览器里。
+- 每次启动都会打印一个以 `#key=...` 结尾的新地址。没有这个 key，页面什么都不显示，所以同一个浏览器里打开的其他网站既读不到也发不了你的消息。
+- 用 Ctrl+C 停止，或者在 Claude Code 里停掉它的后台命令。
+- 在终端里、本仓库的目录下也可以直接运行 `python3 scripts/ui.py`。`--port N` 指定端口；`--no-browser` 只打印地址、不打开浏览器。
+- Sent 页需要服务端是 passnote 0.3.0 或更新的版本。服务端更旧时，这一页会说明，其他功能照常。
 
 ## 部署服务端
 
@@ -119,7 +138,7 @@ Claude Code（Alice 的笔记本）─┐                              ┌─ Cl
 1. 删掉那台电脑上 `config.json` 里的 `token`，重新运行 `/passnote:init`。
 2. 在服务器上：`python3 server.py users add NAME <新哈希> --replace`。
 
-更新服务端：把新的 `server.py` 拷过去，重启一次即可。不同版本的客户端和服务端可以互通；服务端早于 0.2.0 时，`/passnote:status` 列不出其他人。
+更新服务端：把新的 `server.py` 拷过去，重启一次即可。不同版本的客户端和服务端可以互通；服务端早于 0.2.0 时，`/passnote:status` 列不出其他人；早于 0.3.0 时，网页界面看不到你发出的消息。
 
 ## 换服务器或迁移服务器
 
@@ -227,6 +246,10 @@ agent 会遵守 passnote 自带的提示。在项目的 `CLAUDE.md` 里加一小
   - 注入的提示会要求 agent 在做破坏性操作前先问人。
   - 拦截 Stop 不授权任何操作，只是让 agent 先看消息。
 - **限制**：请求有大小上限，正文最多 1000 字，每人每小时最多发 120 条。
+- **网页界面**：
+  - 只监听 `127.0.0.1`；它的 API 只回应带着打印地址里那个 key、并且 `Host` 是这个地址的请求。其他网站既发不了请求，也读不到回应，DNS rebinding 也不行。
+  - token 只留在 `ui.py` 里，任何回应里都没有它。
+  - 消息只按纯文本显示，不当 HTML 解析；Content-Security-Policy 不允许内联脚本或外部脚本。
 
 ## 出问题时
 
@@ -237,6 +260,8 @@ agent 会遵守 passnote 自带的提示。在项目的 `CLAUDE.md` 里加一小
 | `server said 401` | 服务端还不知道你的 token 哈希：把 `/passnote:status` 打印的那一行发给管理服务端的人，由他运行 `server.py users add` |
 | 证书错误 | `init` 时给的证书和服务端现在用的不一致，比如服务器迁移了：用新证书重新运行 `/passnote:init <名字> <地址> <新证书>` |
 | `/passnote:status` 说其他人未知（the others are unknown） | 服务端的 passnote 早于 0.2.0。收发消息不受影响；想列出其他人，就更新它的 `server.py` 并重启一次 |
+| 网页显示“Open the address passnote printed” | 打开时少了 `#key=...` 那部分，或者用的是上一次启动的地址。打开 `/passnote:ui` 最后一次打印的地址 |
+| 网页的 Sent 页说服务端列不出你发的消息 | 服务端的 passnote 早于 0.3.0。更新它的 `server.py` 并重启一次 |
 | `send` 里没有刚加进来的人 | `send` 工具下一次访问服务端之后才会知道新名字。在那之前可以用 `/passnote:mail` 发给他 |
 | `passnote` 的 MCP 服务启动失败 | `PATH` 里找不到 Python 3.9+，`/mcp` 里能看到报错。装上 Python，或者设置 `PASSNOTE_PYTHON`（见[用的是哪个 Python](#用的是哪个-python)） |
 | `/mcp` 里 passnote 显示 `connected · no tools` | 本会话还没开启 passnote。运行 `/passnote:enable`：MCP 服务每 2 秒检查一次，发现开启了就通知 Claude Code，几秒内工具就会加载。还是没有的话，在 `/mcp` 里选 `plugin:passnote:passnote`，再选 Reconnect。在那之前可以用 `/passnote:mail` |

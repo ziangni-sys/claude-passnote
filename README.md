@@ -18,6 +18,7 @@ Claude Code (Alice's laptop) ─┐                              ┌─ Claude C
   - Every other conversation sees no tools, gets no hook output and makes no network calls.
   - The hooks exit in a few lines of bash, without starting Python.
 - **Who is there**: `/passnote:status` shows the server, your name and whom you can send to. The `send` tool lists the same names.
+- **In the browser**: `/passnote:ui` opens a page on your computer where you read, send and ack messages yourself, and see whether the others have acked yours.
 
 ## Requirements
 
@@ -54,6 +55,24 @@ Claude Code (Alice's laptop) ─┐                              ┌─ Claude C
 Other commands:
 - `/passnote:disable` turns passnote off for the session.
 - `/passnote:mail` sends and reads messages from the command line, for a session where the MCP tools are not loaded yet.
+- `/passnote:ui` opens passnote in the browser. See [The web interface](#the-web-interface).
+
+## The web interface
+
+`/passnote:ui` opens passnote in your browser. It is for you rather than the agent:
+
+- **Inbox**: unread or all messages, with their type, refs and whether a reply is wanted. Reply, ack one, or ack them all.
+- **Sent**: what you and your agent sent, and whether each recipient has acked it. Replies are linked both ways.
+- **People**: whom you can write to, and how many unread messages each of them sent you.
+- **New message**: recipient, type, body (at most 1000 characters), refs, and whether you want a reply.
+
+The page refreshes every 15 seconds, and the tab title shows how many messages are unread. It needs no `/passnote:enable` and uses the same name and token as this computer's agent.
+
+- The page is served by `scripts/ui.py`, on `127.0.0.1` only. It calls the server with your token, which never reaches the browser.
+- Each start prints a new address ending in `#key=...`. Without that key the page shows nothing, so other websites open in the same browser cannot read or send your messages.
+- Stop it with Ctrl+C, or by stopping its background command in Claude Code.
+- From a terminal, in a checkout of this repository: `python3 scripts/ui.py`. `--port N` picks the port; `--no-browser` only prints the address.
+- The Sent tab needs a server running passnote 0.3.0 or later. With an older one, the tab says so and everything else works.
 
 ## Running the server
 
@@ -119,7 +138,7 @@ To change a token:
 1. Delete `token` from that computer's `config.json` and run `/passnote:init` again.
 2. On the server: `python3 server.py users add NAME <new hash> --replace`.
 
-To update the server, copy the new `server.py` over and restart it once. Clients and servers of different versions work together; with a server older than 0.2.0, `/passnote:status` cannot list the others.
+To update the server, copy the new `server.py` over and restart it once. Clients and servers of different versions work together; with a server older than 0.2.0, `/passnote:status` cannot list the others; with one older than 0.3.0, the web interface cannot show what you sent.
 
 ## Switching or moving the server
 
@@ -227,6 +246,10 @@ Only for sessions with passnote turned on.
   - The context tells the agent to ask the human before destructive actions.
   - Blocking Stop does not authorise anything; it only makes the agent look at its messages.
 - **Limits**: requests are size-limited, bodies are at most 1000 characters, and each sender can send at most 120 messages an hour.
+- **Web interface**:
+  - It listens on `127.0.0.1` only, and its API answers only requests that carry the key from the address it printed and name that address as `Host`. Other websites can neither send requests to it nor read its answers, by DNS rebinding either.
+  - The token stays in `ui.py`; no answer contains it.
+  - Messages are shown as text, never as HTML, under a Content-Security-Policy that allows no inline or foreign scripts.
 
 ## Troubleshooting
 
@@ -237,6 +260,8 @@ Only for sessions with passnote turned on.
 | `server said 401` | The server does not know your token's hash yet. Send the line that `/passnote:status` prints to whoever runs the server, who runs `server.py users add` |
 | Certificate error | The certificate given to `init` is not the server's current one, for example after the server moved. Run `/passnote:init <name> <url> <new cert>` again |
 | `/passnote:status` says the others are unknown | The server runs passnote older than 0.2.0. Messages work; to list the others, update its `server.py` and restart it once |
+| The web page says "Open the address passnote printed" | It was opened without the `#key=...` part, or with the address of an earlier start. Open the address `/passnote:ui` printed last |
+| The web page's Sent tab says the server cannot list what you sent | The server runs passnote older than 0.3.0. Update its `server.py` and restart it once |
 | `send` does not offer someone who was just added | The `send` tool learns new names after its next call to the server. Until then, `/passnote:mail` can send to them |
 | The `passnote` MCP server fails to start | No Python 3.9+ was found on `PATH`. `/mcp` shows the error. Install Python, or set `PASSNOTE_PYTHON` (see [Which Python is used](#which-python-is-used)) |
 | `/mcp` shows passnote as `connected · no tools` | passnote is not on for this session. Run `/passnote:enable`: the MCP server checks every 2 seconds and tells Claude Code, which loads the tools within a few seconds. If they still do not appear, select `plugin:passnote:passnote` in `/mcp` and choose Reconnect. Until then, `/passnote:mail` works |

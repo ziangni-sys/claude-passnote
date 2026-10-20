@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>passnote</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <div class="brand"><img src="/icon.svg" alt="" width="24" height="24"><span>passnote</span></div>
+  <div class="who" id="who"></div>
+  <div class="conn wait" id="conn" role="status"><span class="dot"></span>connecting…</div>
+  <div class="top-actions">
+    <button type="button" class="icon-btn" id="refresh" title="Refresh (R)" aria-label="Refresh">
+      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/>
+      </svg>
+    </button>
+    <button type="button" class="primary" id="compose-open" title="New message (N)">New message</button>
+  </div>
+</header>
+
+<div class="banner" id="banner" hidden></div>
+
+<main class="layout">
+  <nav class="side" aria-label="Mailboxes and people">
+    <div class="boxes">
+      <button type="button" class="box" data-view="inbox">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 12h-6l-2 3h-4l-2-3H2"/>
+          <path d="M5.5 5.1 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.9A2 2 0 0 0 16.7 4H7.3a2 2 0 0 0-1.8 1.1Z"/>
+        </svg>
+        <span class="box-name">Inbox</span><span class="count" id="count-inbox"></span>
+      </button>
+      <button type="button" class="box" data-view="sent">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>
+        </svg>
+        <span class="box-name">Sent</span><span class="count muted-count" id="count-sent"
+                                                title="not acked yet by their recipient"></span>
+      </button>
+    </div>
+    <h2 class="side-title">People</h2>
+    <ul class="people" id="people"></ul>
+  </nav>
+
+  <section class="content" aria-live="polite">
+    <div class="toolbar" id="toolbar"></div>
+    <ol class="messages" id="messages"></ol>
+  </section>
+</main>
+
+<dialog id="compose" aria-labelledby="compose-title">
+  <form id="compose-form" novalidate>
+    <header class="dlg-head">
+      <h2 id="compose-title">New message</h2>
+      <button type="button" class="icon-btn" data-close aria-label="Close">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </header>
+    <div class="replying" id="replying" hidden>
+      <span id="replying-text"></span>
+      <button type="button" class="link" id="replying-clear">not a reply</button>
+    </div>
+    <label class="field">
+      <span class="label">To</span>
+      <select id="f-to"></select>
+      <input id="f-to-text" type="text" autocomplete="off" spellcheck="false" placeholder="their passnote name" hidden>
+    </label>
+    <fieldset class="field">
+      <legend class="label">Type</legend>
+      <div class="types" id="f-types">
+        <label class="type-opt t-info"><input type="radio" name="type" value="info" checked><span>info</span></label>
+        <label class="type-opt t-request"><input type="radio" name="type" value="request"><span>request</span></label>
+        <label class="type-opt t-interface_change"><input type="radio" name="type" value="interface_change"><span>interface change</span></label>
+        <label class="type-opt t-claim"><input type="radio" name="type" value="claim"><span>claim</span></label>
+        <label class="type-opt t-done"><input type="radio" name="type" value="done"><span>done</span></label>
+      </div>
+      <p class="hint" id="f-type-hint"></p>
+    </fieldset>
+    <label class="field">
+      <span class="label">Message <span class="counter" id="f-count">0 / 1000</span></span>
+      <textarea id="f-body" rows="6" placeholder="A few lines. Put details into a file in the project and list it under refs."></textarea>
+    </label>
+    <label class="field">
+      <span class="label">Refs <span class="optional">optional</span></span>
+      <input id="f-refs" type="text" autocomplete="off" spellcheck="false"
+             placeholder="commit SHAs, file paths, separated by spaces">
+    </label>
+    <label class="check"><input type="checkbox" id="f-needs-reply"> Ask for a reply</label>
+    <p class="form-error" id="f-error" role="alert" hidden></p>
+    <footer class="dlg-foot">
+      <span class="hint">Ctrl+Enter sends</span>
+      <button type="button" data-close>Cancel</button>
+      <button type="submit" class="primary" id="f-send">Send</button>
+    </footer>
+  </form>
+</dialog>
+
+<div class="locked" id="locked" hidden>
+  <div class="locked-card">
+    <img src="/icon.svg" alt="" width="40" height="40">
+    <h1>Open the address passnote printed</h1>
+    <p>This page needs the full address that <code>/passnote:ui</code> printed, the one ending in
+      <code>#key=…</code>. Each start makes a new one, so that no other website can read your messages.</p>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

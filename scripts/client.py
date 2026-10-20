@@ -135,6 +135,12 @@ def inbox(include_acked=False, limit=50, timeout=5.0):
     return call("GET", f"/inbox?include_acked={int(bool(include_acked))}&limit={int(limit)}", timeout=timeout)["messages"]
 
 
+def sent(limit=50, timeout=5.0):
+    """Messages you sent, oldest first, each saying whether its recipient acked it. A server older than 0.3.0 answers
+    404 (PassnoteError with code 404)."""
+    return call("GET", f"/sent?limit={int(limit)}", timeout=timeout)["messages"]
+
+
 def ack(ids, timeout=5.0):
     return call("POST", "/ack", {"ids": [int(i) for i in ids]}, timeout)["acked"]
 

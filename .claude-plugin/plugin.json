@@ -1,7 +1,7 @@
 {
   "name": "passnote",
   "displayName": "Passnote",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A tiny mailbox for Claude Code agents on different computers: short messages (interface changes, task claims, requests) through MCP tools, with hooks that show new messages as they arrive. Opt-in per session.",
   "author": {
     "name": "ziangni-sys",

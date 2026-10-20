@@ -25,6 +25,10 @@ API (JSON; every call except /health needs "Authorization: Bearer <token>"):
                                                        -> {"id", "created_at"}
   GET  /inbox?include_acked=0&limit=50                 -> {"user", "messages": [...]}  addressed to the caller,
                                                                                oldest first
+  GET  /sent?limit=50                                  -> {"user", "messages": [...]}  sent by the caller, oldest
+                                                                               first, each saying whether its recipient
+                                                                               acked it (since 0.3.0; older servers
+                                                                               answer 404)
   POST /ack    {"ids": [...]}                          -> {"acked": n}         only messages addressed to the caller
 A message: {id, from, to, type, body, refs, needs_reply, reply_to, created_at, acked, acked_at}; type is one of
 info / request / interface_change / claim / done; body at most MAX_BODY characters (details go into a file the
@@ -70,6 +74,7 @@ CREATE TABLE IF NOT EXISTS messages (
   acked_at TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_inbox ON messages (recipient, acked_at, id);
+CREATE INDEX IF NOT EXISTS ix_sent ON messages (sender, id);
 """
 
 
@@ -159,6 +164,12 @@ class Store:
             rows = self.db.execute(q + " ORDER BY id DESC LIMIT ?", (user, limit)).fetchall()
         return [self.public(r) for r in reversed(rows)]
 
+    def sent(self, user, limit):
+        with self.lock:
+            rows = self.db.execute("SELECT * FROM messages WHERE sender = ? ORDER BY id DESC LIMIT ?",
+                                   (user, limit)).fetchall()
+        return [self.public(r) for r in reversed(rows)]
+
     def ack(self, user, ids):
         with self.lock, self.db:
             cur = self.db.execute(
@@ -212,13 +223,15 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(401, {"error": "unauthorized"})
         if u.path == "/whoami":
             return self.reply(200, {"user": user, "peers": sorted(n for n in self.users.current() if n != user)})
-        if u.path != "/inbox":
+        if u.path not in ("/inbox", "/sent"):
             return self.reply(404, {"error": "not found"})
         q = parse_qs(u.query)
         try:
             limit = max(1, min(200, int(q.get("limit", ["50"])[0])))
         except ValueError:
             return self.reply(400, {"error": "limit must be an integer"})
+        if u.path == "/sent":
+            return self.reply(200, {"user": user, "messages": self.store.sent(user, limit)})
         include_acked = q.get("include_acked", ["0"])[0] in ("1", "true")
         self.reply(200, {"user": user, "messages": self.store.inbox(user, include_acked, limit)})
 

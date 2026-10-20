@@ -1,12 +1,13 @@
 """Local end-to-end test of passnote (server/server.py, scripts/client.py, mcp_server.py, hook.py, hook.sh and the
 plugin's own configuration): starts the real server on 127.0.0.1 (plain HTTP, and HTTPS with a self-signed certificate
 when openssl can make one) with a temporary database, then checks the API (auth, sender from the token, validation,
-reply_to, ack only own messages, whoami), who is there (status, hash, stats; users add / remove on a running server, no
+reply_to, ack only own messages, whoami, sent), who is there (status, hash, stats; users add / remove on a running server, no
 restart; a server older than 0.2.0 without /whoami), the MCP server (no tools unless the session opted in; send /
 read_inbox / ack; the others' names in send's `to`, also after someone is added; tools that appear and go away when the
 session is turned on or off while the server runs), the hooks (silent unless opted in; each message shown once; Stop
-blocks once per message; unreachable or wrong-certificate server: silent and fast), the shipped hooks/hooks.json and MCP
-server entry of plugin.json exactly as Claude Code runs them, switching servers, and non-ASCII text.
+blocks once per message; unreachable or wrong-certificate server: silent and fast), the web interface (ui.py: its API,
+its key and Host check, the token never in an answer, older servers), the shipped hooks/hooks.json and MCP server entry
+of plugin.json exactly as Claude Code runs them, switching servers, and non-ASCII text.
 usage: python tests/test_passnote.py <scratch dir>     (the scratch dir is deleted and recreated)"""
 import json
 import os
@@ -53,7 +54,7 @@ THREE = ["send", "read_inbox", "ack"]
 TOKENS = os.path.join(work, "tokens.json")
 with open(TOKENS, "w") as f:
     json.dump({k: server.token_hash(v) for k, v in TOK.items()}, f)
-# a passnote 0.1 server, as still deployed: /whoami is unknown to it, like any other path it does not serve
+# a passnote 0.1 server, as still deployed: /whoami and /sent are unknown to it, like any other path it does not serve
 OLD_SERVER = os.path.join(work, "old_server.py")
 with open(OLD_SERVER, "w") as f:
     f.write(f"""import sys
@@ -62,7 +63,7 @@ import server
 from urllib.parse import urlparse
 get = server.Handler.do_GET
 def do_GET(self):
-    if urlparse(self.path).path == "/whoami":
+    if urlparse(self.path).path in ("/whoami", "/sent"):
         return self.reply(404, {{"error": "not found"}}) if self.user() else self.reply(401, {{"error": "unauthorized"}})
     return get(self)
 server.Handler.do_GET = do_GET
@@ -184,6 +185,56 @@ class Live:
 changed = lambda m: m.get("method") == "notifications/tools/list_changed"      # noqa: E731
 
 
+class Page:
+    """ui.py as /passnote:ui starts it (without opening a browser): the address it printed, and requests like the
+    page's."""
+
+    def __init__(self, e):
+        self.log = open(os.path.join(work, f"ui-{time.time_ns()}.log"), "w")
+        self.p = subprocess.Popen([PY, os.path.join(SCRIPTS, "ui.py"), "--no-browser"], stdout=subprocess.PIPE,
+                                  stderr=self.log, env=e)
+        q = queue.Queue()
+        threading.Thread(target=lambda: q.put(self.p.stdout.readline()), daemon=True).start()
+        try:
+            line = q.get(timeout=60).decode("utf-8", "replace")
+        except queue.Empty:
+            line = ""
+        m = re.search(r"(http://127\.0\.0\.1:(\d+))/#key=([A-Za-z0-9_-]+)", line)
+        if not m:
+            self.close()
+            raise RuntimeError(f"ui.py printed {line!r}: " + open(self.log.name).read()[-2000:])
+        self.base, self.port, self.key = m.groups()
+        self.answers = []       # every answer's bytes, to check that none contains the token
+
+    def req(self, path, body=None, key=True, host=None):
+        """-> (HTTP status, decoded JSON or the raw bytes, headers)"""
+        headers = {}
+        if key:
+            headers["X-Passnote-Key"] = self.key if key is True else key
+        if host:
+            headers["Host"] = host
+        data = None
+        if body is not None:
+            data, headers["Content-Type"] = json.dumps(body).encode(), "application/json"
+        r = urllib.request.Request(self.base + path, data=data, headers=headers)
+        try:
+            with urllib.request.urlopen(r, timeout=20) as resp:
+                code, raw, hdrs = resp.status, resp.read(), resp.headers
+        except urllib.error.HTTPError as ex:
+            code, raw, hdrs = ex.code, ex.read(), ex.headers
+        self.answers.append(raw)
+        try:
+            return code, json.loads(raw), hdrs
+        except ValueError:
+            return code, raw, hdrs
+
+    def close(self):
+        if self.p.poll() is None:
+            self.p.terminate()
+            self.p.wait(10)
+        self.log.close()
+
+
 def hook(e, mode, sid, **extra):
     t = time.time()
     r = subprocess.run([PY, os.path.join(SCRIPTS, "hook.py"), mode],
@@ -274,6 +325,12 @@ try:
           and h_b[0] == 0 and h_b[1].strip() == line_b and h_none[0] != 0 and "--name" in h_none[2]
           and st_401[0] != 0 and "401" in st_401[1]
           and f'"<your name>": "{server.token_hash("wrong")}"' in st_401[1], st_b[1].strip().splitlines()[-2:])
+    s_a, s_b = get(URL, "/sent", TOK["alice"]), get(URL, "/sent", TOK["bob"])
+    check("sent: what the caller sent, oldest first, saying whether the recipient acked it; nobody else's; needs a "
+          "valid token",
+          s_a[0] == 200 and [m["id"] for m in s_a[1]["messages"]] == [m1["id"]] and s_a[1]["messages"][0]["acked"] is True
+          and s_b[0] == 200 and [m["body"] for m in s_b[1]["messages"]] == ["收到"]
+          and s_b[1]["messages"][0]["acked"] is False and get(URL, "/sent", "wrong")[0] == 401)
     db1 = os.path.join(work, f"m{port}.db")
 
     def db_files(db):
@@ -443,6 +500,67 @@ try:
           and "enum" not in to_old and "you are alice" in to_old.get("description", "")
           and old[2]["result"]["isError"] is False and old_in[0] == 0 and len(old_in[1]) == 1,
           f"{st_old[1].strip().splitlines()[-2:]} {to_old}")
+
+    # 2d. the web interface (ui.py, /passnote:ui): it calls the server with this computer's token, which never reaches
+    # the page; its API answers only with the key it printed and only to its own address (no other website can use it);
+    # the page comes with a Content-Security-Policy that allows no inline or foreign scripts
+    page = Page(eA)
+    try:
+        html, js = page.req("/", key=False), page.req("/app.js", key=False)
+        csp = html[2].get("Content-Security-Policy", "")
+        stray = [page.req(p, key=False)[0] for p in ("/client.py", "/../client.py", "/ui.py", "/%2e%2e/client.py")]
+        locked = [page.req("/api/state", key=False)[0], page.req("/api/state", key="x" * 32)[0],
+                  page.req("/api/state", host=f"evil.example:{page.port}")[0],
+                  page.req("/", key=False, host="evil.example")[0],
+                  page.req("/api/send", {"to": "bob", "type": "info", "body": "x"}, key=False)[0]]
+        m_in = api(eB, "send", "--to", "alice", "--type", "request", "--body", "<b>请</b> rerun", "--needs_reply")[1]
+        c0, s0, _ = page.req("/api/state")
+        c1, sent_ui, _ = page.req("/api/send", {"to": "bob", "type": "done", "body": "页面发的", "refs": ["abc1234"],
+                                                "reply_to": m_in["id"]})
+        bad_send = page.req("/api/send", {"to": "nobody", "type": "info", "body": "x"})
+        bad_req = page.req("/api/send", {"type": "info"})
+        c2, acked_ui, _ = page.req("/api/ack", {"ids": [m_in["id"]]})
+        bob_in = api(eB, "inbox")[1]
+        api(eB, "ack", str(sent_ui.get("id")))
+        c3, s1, _ = page.req("/api/state")
+    finally:
+        page.close()
+    got_in = next((m for m in s0.get("inbox", []) if m["id"] == m_in["id"]), {})
+    mine = next((m for m in s1.get("sent") or [] if m["id"] == sent_ui.get("id")), {})
+    check("ui: serves the page with a Content-Security-Policy (no inline scripts) and nothing else; the API needs the "
+          "key it printed and its own Host",
+          html[0] == 200 and b"/app.js" in html[1] and js[0] == 200 and "script-src 'self'" in csp
+          and "unsafe-inline" not in csp and stray == [404] * 4 and locked == [403] * 5, f"{stray} {locked}")
+    check("ui: state names you, the others, your inbox and what you sent; send (with reply_to) and ack work, the "
+          "recipient's ack shows in sent; errors come back as errors; the token is in no answer",
+          c0 == 200 and s0["user"] == "alice" and s0["peers"] == ["bob"] and s0["error"] is None
+          and got_in.get("body") == "<b>请</b> rerun" and got_in.get("acked") is False and isinstance(s0["sent"], list)
+          and c1 == 200 and "id" in sent_ui and c2 == 200 and acked_ui == {"acked": 1}
+          and any(m["id"] == sent_ui["id"] and m["from"] == "alice" and m["reply_to"] == m_in["id"] for m in bob_in)
+          and c3 == 200 and mine.get("acked") is True
+          and next(m for m in s1["inbox"] if m["id"] == m_in["id"])["acked"] is True
+          and bad_send[0] == 502 and "to: one of" in bad_send[1].get("error", "") and bad_req[0] == 400
+          and not any(TOK["alice"].encode() in a for a in page.answers), bad_send[1])
+    port5 = free_port()
+    srv5 = start(port5, script=OLD_SERVER)
+    pages = []
+    try:
+        for e in (env("alice", f"http://127.0.0.1:{port5}", HOME_A), env("alice", URL, HOME_A, PASSNOTE_TOKEN="wrong"),
+                  {k: v for k, v in env("alice", URL, os.path.join(work, "home_ui")).items()
+                   if k not in ("PASSNOTE_TOKEN", "PASSNOTE_URL")}):
+            pages.append(Page(e))
+        old_ui, unknown_ui, unset_ui = [p.req("/api/state")[1] for p in pages]
+    finally:
+        for p in pages:
+            p.close()
+        srv5.terminate()
+    check("ui with a server older than 0.3.0: the inbox, sent null; with a token the server does not know: the error "
+          "and your tokens.json line; not set up: says to run /passnote:init",
+          old_ui.get("user") == "alice" and old_ui.get("peers") is None and old_ui.get("inbox") == []
+          and old_ui.get("sent", []) is None and unknown_ui.get("code") == 401
+          and server.token_hash("wrong") in unknown_ui.get("line", "") and "inbox" not in unknown_ui
+          and unset_ui.get("configured") is False and "/passnote:init" in unset_ui.get("error", ""),
+          f"{unknown_ui.get('error')} | {unset_ui.get('error')}")
 
     # 3. opting in, and the hooks (bob's side: one unread message from alice, id sent["id"])
     r_off = hook(eB, "prompt", sid)
