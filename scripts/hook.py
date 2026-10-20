@@ -8,6 +8,9 @@ Silent (no output, exit 0) unless the session opted in (client.py: PASSNOTE_ENAB
 silent when passnote is not configured, the server is unreachable or slow (HTTP timeout PASSNOTE_HOOK_TIMEOUT, default
 1.2 s) or anything else fails, so a hook never holds up the session. Per session (state in PASSNOTE_HOME/state/), each
 message is shown at most once and blocks Stop at most once.
+Presence (server.py): the calls belong to the session of the hook input, like the MCP server's, and the prompt hook's
+tells the server that you sent a prompt (that you did, never what you wrote), unless PASSNOTE_PRESENCE=0. The output
+does not change.
 """
 import json
 import os
@@ -88,8 +91,10 @@ def main():
     if mode == "post" and t - st["last_poll"] < float(os.environ.get("PASSNOTE_POLL_SECONDS", "20")):
         return
     st["last_poll"] = t
+    client.SESSION = sid        # so that the MCP server's /bye, when the session closes, also ends what these calls did
     try:
-        unread = client.inbox(timeout=float(os.environ.get("PASSNOTE_HOOK_TIMEOUT", "1.2")))
+        unread = client.inbox(timeout=float(os.environ.get("PASSNOTE_HOOK_TIMEOUT", "1.2")),
+                              event="prompt" if mode == "prompt" else None)
     except client.PassnoteError:
         save_state(path, st)
         return

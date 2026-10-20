@@ -52,6 +52,7 @@ const st = {
   status: null,           // the last /api/state answer
   inbox: [],              // the last messages we got; kept while the server cannot be reached
   sent: null,             // null: this server cannot list them
+  presence: null,         // Map name -> {online, prompt: ISO time on this computer's clock or null}; null: not known
   loaded: false,
   offline: "",            // ui.py itself does not answer
   locked: false,
@@ -88,6 +89,7 @@ function refresh() {
       const s = await api("/api/state");
       st.status = s;
       st.offline = "";
+      if (s.user) st.presence = presence(s.presence);
       if (s.inbox) {
         st.inbox = s.inbox;
         st.sent = s.sent;
@@ -107,6 +109,21 @@ function refresh() {
 
 const unread = () => st.inbox.filter((m) => !m.acked);
 const byId = () => new Map([...st.inbox, ...(st.sent || [])].map((m) => [m.id, m]));
+
+/* the server says how many seconds ago each of the others last sent a prompt; turn that into a time on this computer's
+   clock once per answer, so that it ticks on with the other times. null: a server older than 0.4.0 */
+function presence(p) {
+  if (!p || typeof p !== "object") return null;
+  const now = Date.now(), out = new Map();
+  for (const [name, v] of Object.entries(p)) {
+    if (!v || typeof v !== "object") continue;
+    const s = v.last_prompt;
+    out.set(name, { online: v.online === true,
+      prompt: Number.isFinite(s) && s >= 0 ? new Date(now - s * 1000).toISOString() : null });
+  }
+  return out;
+}
+const isOnline = (name) => !!(st.presence && st.presence.get(name) && st.presence.get(name).online);
 
 /* time */
 function ago(iso) {
@@ -222,10 +239,22 @@ function renderSide() {
   }
   const from = {};
   for (const m of unread()) from[m.from] = (from[m.from] || 0) + 1;
-  people.replaceChildren(...s.peers.map((p) => h("li", {},
-    h("button", { type: "button", class: "person", title: `Write to ${p}`, onclick: () => openCompose({ to: p }) },
-      avatar(p), h("span", { class: "name" }, p),
-      from[p] ? h("span", { class: "count", title: "unread from them" }, from[p]) : h("span", { class: "write" }, "write")))));
+  people.replaceChildren(...s.peers.map((p) => {
+    const seen = st.presence ? st.presence.get(p) : undefined;
+    return h("li", {},
+      h("button", { type: "button", class: "person", title: `Write to ${p}`, onclick: () => openCompose({ to: p }) },
+        h("span", { class: "av-wrap" }, avatar(p), seen ? dot(seen.online) : null),
+        h("span", { class: "name-col" }, h("span", { class: "name" }, p),
+          seen ? h("span", { class: "seen" }, seen.prompt ? ["last prompt ", timeEl(seen.prompt)] : "no prompt seen") : null),
+        from[p] ? h("span", { class: "count", title: "unread from them" }, from[p]) : h("span", { class: "write" }, "write")));
+  }));
+}
+
+function dot(online) {
+  const text = online ? "online: a Claude Code session of theirs with passnote on is open"
+    : "offline: no Claude Code session of theirs with passnote on was heard from in the last few minutes";
+  return h("span", { class: `presence ${online ? "on" : "off"}`, role: "img", "aria-label": online ? "online" : "offline",
+    title: text });
 }
 
 function renderList() {
@@ -420,7 +449,7 @@ function openCompose(opts = {}) {
   f.toText.hidden = useSelect;
   if (useSelect) {
     const keep = opts.to || f.to.value;
-    f.to.replaceChildren(...peers.map((p) => h("option", { value: p }, p)));
+    f.to.replaceChildren(...peers.map((p) => h("option", { value: p }, isOnline(p) ? `${p} (online)` : p)));
     if (keep && !peers.includes(keep)) f.to.append(h("option", { value: keep }, keep));
     if (keep) f.to.value = keep;
   } else if (opts.to) {
