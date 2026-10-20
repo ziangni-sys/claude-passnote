@@ -6,8 +6,10 @@ restart; a server older than 0.2.0 without /whoami), the MCP server (no tools un
 read_inbox / ack; the others' names in send's `to`, also after someone is added; tools that appear and go away when the
 session is turned on or off while the server runs), the hooks (silent unless opted in; each message shown once; Stop
 blocks once per message; unreachable or wrong-certificate server: silent and fast), the web interface (ui.py: its API,
-its key and Host check, the token never in an answer, older servers), the shipped hooks/hooks.json and MCP server entry
-of plugin.json exactly as Claude Code runs them, switching servers, and non-ASCII text.
+its key and Host check, the token never in an answer, older servers), who is around (online from the Claude side's
+requests and the MCP server's heartbeat, never the web page's; last prompt from the prompt hook; /bye per session;
+PASSNOTE_PRESENCE=0; presence never reloads the tools; servers without it), the shipped hooks/hooks.json and MCP server
+entry of plugin.json exactly as Claude Code runs them, switching servers, and non-ASCII text.
 usage: python tests/test_passnote.py <scratch dir>     (the scratch dir is deleted and recreated)"""
 import json
 import os
@@ -54,21 +56,42 @@ THREE = ["send", "read_inbox", "ack"]
 TOKENS = os.path.join(work, "tokens.json")
 with open(TOKENS, "w") as f:
     json.dump({k: server.token_hash(v) for k, v in TOK.items()}, f)
-# a passnote 0.1 server, as still deployed: /whoami and /sent are unknown to it, like any other path it does not serve
-OLD_SERVER = os.path.join(work, "old_server.py")
-with open(OLD_SERVER, "w") as f:
-    f.write(f"""import sys
+
+
+def stub(name, code):
+    """server.py changed by code, as a script for start(script=...)"""
+    path = os.path.join(work, name)
+    with open(path, "w") as f:
+        f.write(f"""import sys
 sys.path.insert(0, {SERVER!r})
 import server
 from urllib.parse import urlparse
-get = server.Handler.do_GET
-def do_GET(self):
-    if urlparse(self.path).path in ("/whoami", "/sent"):
-        return self.reply(404, {{"error": "not found"}}) if self.user() else self.reply(401, {{"error": "unauthorized"}})
-    return get(self)
-server.Handler.do_GET = do_GET
+def unknown(paths, handle):
+    def do(self):
+        if urlparse(self.path).path in paths:
+            return self.reply(404, {{"error": "not found"}}) if self.user() else self.reply(401, {{"error": "unauthorized"}})
+        return handle(self)
+    return do
+{code}
 server.main()
 """)
+    return path
+
+
+# a passnote 0.1 server, as still deployed: /whoami, /sent and /bye are unknown to it, like any other path it does not
+# serve
+OLD_SERVER = stub("old_server.py", """server.Handler.do_GET = unknown(("/whoami", "/sent"), server.Handler.do_GET)
+server.Handler.do_POST = unknown(("/bye",), server.Handler.do_POST)""")
+# a passnote 0.2 or 0.3 server: /whoami without presence, no /bye
+V03_SERVER = stub("v03_server.py", """server.Handler.do_POST = unknown(("/bye",), server.Handler.do_POST)
+reply = server.Handler.reply
+def reply_without_presence(self, code, obj):
+    if isinstance(obj, dict):
+        obj.pop("presence", None)
+    return reply(self, code, obj)
+server.Handler.reply = reply_without_presence""")
+# presence with a short ONLINE_SECONDS: a session that is not heard from goes offline within the test
+FAST_SERVER = stub("fast_server.py", "server.ONLINE_SECONDS = 3")
 
 
 def start(port, *extra, script=os.path.join(SERVER, "server.py"), tokens=TOKENS):
@@ -120,9 +143,9 @@ def users(*args, tokens=TOKENS):
     return admin("users", "--tokens", tokens, *args)
 
 
-def get(url, path, token):
+def get(url, path, token, headers=None):
     """-> (HTTP status, decoded JSON or None)"""
-    req = urllib.request.Request(url + path, headers={"Authorization": "Bearer " + token})
+    req = urllib.request.Request(url + path, headers={"Authorization": "Bearer " + token, **(headers or {})})
     try:
         return 200, json.loads(urllib.request.urlopen(req, timeout=5).read())
     except urllib.error.HTTPError as ex:
@@ -318,9 +341,11 @@ try:
     h_b = cli(eB, "hash", "--name", "bob")
     h_none = cli(eB, "hash")                    # nothing in HOME_B: init never recorded a name
     st_401 = cli(env("alice", URL, HOME_A, PASSNOTE_TOKEN="wrong"), "status")
-    check("whoami: your name and the others'; status says whom you can send to and prints your tokens.json line, as "
-          "hash does; with a token the server does not know, status says so and still prints the line",
-          w_a == (200, {"user": "alice", "peers": ["bob"]}) and w_bad[0] == 401
+    check("whoami: your name, the others' and whether they are around; status says whom you can send to and prints "
+          "your tokens.json line, as hash does; with a token the server does not know, status says so and still prints "
+          "the line",
+          w_a == (200, {"user": "alice", "peers": ["bob"], "presence": {"bob": {"online": True, "last_prompt": None}}})
+          and w_bad[0] == 401
           and "you are bob; you can send to alice" in st_b[1] and line_b in st_b[1] and st_b[0] == 0
           and h_b[0] == 0 and h_b[1].strip() == line_b and h_none[0] != 0 and "--name" in h_none[2]
           and st_401[0] != 0 and "401" in st_401[1]
@@ -453,10 +478,10 @@ try:
     srv_log = open(os.path.join(work, f"server-{port}.log"), encoding="utf-8").read()
     check("users add --replace swaps the hash (old token refused, new one accepted); a broken tokens.json is reported "
           "in the log and the previous users stay; users remove: the token is refused at once",
-          replaced[0] == 0 and old_tok != 0 and new_tok == 0 and during == (200, {"user": "alice",
-                                                                                 "peers": ["bob", "carol"]})
+          replaced[0] == 0 and old_tok != 0 and new_tok == 0 and during[0] == 200
+          and (during[1]["user"], during[1]["peers"]) == ("alice", ["bob", "carol"])
           and "tokens.json not reloaded" in srv_log and removed[0] == 0 and after_rm != 0
-          and get(URL, "/whoami", TOK["alice"]) == (200, {"user": "alice", "peers": ["bob"]}))
+          and get(URL, "/whoami", TOK["alice"])[1]["peers"] == ["bob"])
 
     # a server started with nobody in tokens.json, filled while it runs; and users add creating tokens.json
     empty_tokens = os.path.join(work, "tokens_empty.json")
@@ -500,6 +525,34 @@ try:
           and "enum" not in to_old and "you are alice" in to_old.get("description", "")
           and old[2]["result"]["isError"] is False and old_in[0] == 0 and len(old_in[1]) == 1,
           f"{st_old[1].strip().splitlines()[-2:]} {to_old}")
+    # a server of 0.2.0 or 0.3.0: names, but no presence and no /bye
+    port6 = free_port()
+    srv6 = start(port6, script=V03_SERVER)
+    try:
+        U6 = f"http://127.0.0.1:{port6}"
+        st_v03 = cli(env("alice", U6, HOME_A), "status")
+        lv = Live(env("alice", U6, HOME_A, PASSNOTE_ENABLE=1, PASSNOTE_HEARTBEAT_SECONDS=0.3))
+        try:
+            lv.rpc(1, "initialize", protocolVersion="2025-06-18")
+            lv.say(INITIALIZED)
+            to_v03 = to_field(lv.rpc(2, "tools/list")["result"]["tools"])
+            quiet_v03 = lv.until(changed, 1.0)
+            call_v03 = lv.rpc(3, "tools/call", name="read_inbox", arguments={})
+        finally:
+            rc_v03 = lv.close()
+        pg = Page(env("alice", U6, HOME_A))
+        try:
+            ui_v03 = pg.req("/api/state")[1]
+        finally:
+            pg.close()
+    finally:
+        srv6.terminate()
+    check("server without presence (0.2.0, 0.3.0): status lists the others as before; the MCP server's tools, heartbeat "
+          "and goodbye (an unknown /bye) work; ui state has presence null",
+          st_v03[0] == 0 and "you are alice; you can send to bob" in st_v03[1].splitlines()
+          and to_v03.get("enum") == ["bob"] and quiet_v03 is None and call_v03["result"]["isError"] is False
+          and rc_v03 == 0 and ui_v03.get("error") is None and ui_v03.get("peers") == ["bob"]
+          and "presence" in ui_v03 and ui_v03["presence"] is None, st_v03[1].strip().splitlines()[-2:])
 
     # 2d. the web interface (ui.py, /passnote:ui): it calls the server with this computer's token, which never reaches
     # the page; its API answers only with the key it printed and only to its own address (no other website can use it);
@@ -554,10 +607,10 @@ try:
         for p in pages:
             p.close()
         srv5.terminate()
-    check("ui with a server older than 0.3.0: the inbox, sent null; with a token the server does not know: the error "
-          "and your tokens.json line; not set up: says to run /passnote:init",
+    check("ui with a server older than 0.3.0: the inbox, sent and presence null; with a token the server does not know: "
+          "the error and your tokens.json line; not set up: says to run /passnote:init",
           old_ui.get("user") == "alice" and old_ui.get("peers") is None and old_ui.get("inbox") == []
-          and old_ui.get("sent", []) is None and unknown_ui.get("code") == 401
+          and old_ui.get("sent", []) is None and old_ui.get("presence", {}) is None and unknown_ui.get("code") == 401
           and server.token_hash("wrong") in unknown_ui.get("line", "") and "inbox" not in unknown_ui
           and unset_ui.get("configured") is False and "/passnote:init" in unset_ui.get("error", ""),
           f"{unknown_ui.get('error')} | {unset_ui.get('error')}")
@@ -604,6 +657,156 @@ try:
           and f"#{sent['id']}" not in s3[0]["reason"])
     api(eB, "ack", str(sent["id"]), str(m3["id"]), str(m4["id"]))
     check("stop hook: nothing unread, nothing to say", hook(eB, "stop", sid)[0] is None)
+
+    # 3b. who is around: online (a request from someone's Claude side within ONLINE_SECONDS, from any of their sessions;
+    # the web page's requests do not count; /bye ends one session) and last prompt (the prompt hook's calls). On servers
+    # of their own, so that nothing done above counts; whoever looks asks with X-Passnote-Presence: off
+    import mcp_server      # noqa: E402     the decision to reload the tools, in this process
+    answers = [{"user": "alice", "peers": ["bob"], "presence": {"bob": {"online": True, "last_prompt": 5}}},
+               {"user": "alice", "peers": ["bob"], "presence": {"bob": {"online": False, "last_prompt": 300}}},
+               {"user": "alice", "peers": ["bob"], "presence": {"bob": {"online": True, "last_prompt": 1}}},
+               {"user": "alice", "peers": ["bob", "dave"], "presence": {"bob": {"online": True, "last_prompt": 1},
+                                                                        "dave": {"online": False, "last_prompt": None}}}]
+    written, real = [], (client.whoami, mcp_server.write, mcp_server.ACTIVE)
+    client.whoami, mcp_server.write, mcp_server.ACTIVE = (lambda timeout=5.0: answers.pop(0)), written.append, True
+    try:
+        mcp_server.ask_server()             # the first answer, before the client listed the tools
+        mcp_server._listed.append(True)
+        mcp_server.ask_server()             # presence changes, the names do not: twice
+        mcp_server.ask_server()
+        quiet_n, schema = len(written), json.dumps(mcp_server.tools())
+        mcp_server.ask_server()             # somebody new
+    finally:
+        client.whoami, mcp_server.write, mcp_server.ACTIVE = real
+    check("MCP: a change of presence alone does not reload the tools (no tools/list_changed), a new name does; presence "
+          "is in no tool",
+          quiet_n == 0 and [m.get("method") for m in written] == ["notifications/tools/list_changed"]
+          and mcp_server.WHO["peers"] == ["bob", "dave"]
+          and not any(w in schema for w in ("online", "presence", "last_prompt")), written)
+
+    TOKENS_P = os.path.join(work, "tokens_presence.json")
+    with open(TOKENS_P, "w") as f:
+        json.dump({k: server.token_hash(TOK[k]) for k in ("alice", "bob", "carol")}, f)
+
+    def around(viewer, url):
+        """viewer's /whoami presence, asked without being recorded"""
+        return get(url, "/whoami", TOK[viewer], {"X-Passnote-Presence": "off"})[1]["presence"]
+    nobody_p = {"online": False, "last_prompt": None}
+    portP = free_port()
+    srvP = start(portP, tokens=TOKENS_P)
+    UP = f"http://127.0.0.1:{portP}"
+    home_cp, sid_c = os.path.join(work, "home_carol_p"), "sess-carol"
+    eBp, eCp = env("bob", UP, HOME_B), env("carol", UP, home_cp)
+    page = Page(env("alice", UP, HOME_A))
+    try:
+        ui0 = page.req("/api/state")[1]
+        page.req("/api/state")
+        alice0 = around("bob", UP)["alice"]
+        get(UP, "/inbox", TOK["bob"], {"X-Passnote-Client": "ui"})
+        cli(env("bob", UP, HOME_B, PASSNOTE_PRESENCE=0), "inbox")
+        hook(env("bob", UP, HOME_B, PASSNOTE_PRESENCE=0), "prompt", sid)
+        bob_quiet = around("alice", UP)
+        cli(eBp, "inbox")
+        bob_on = around("alice", UP)
+        check("presence: a Claude-side request makes you online for the others; the web page's requests and calls with "
+              "PASSNOTE_PRESENCE=0 (the prompt hook's too) do not; whoami gives presence for the others only",
+              ui0.get("presence") == {"bob": nobody_p, "carol": nobody_p} and alice0 == nobody_p
+              and bob_quiet == {"bob": nobody_p, "carol": nobody_p}
+              and bob_on == {"bob": {"online": True, "last_prompt": None}, "carol": nobody_p}
+              and set(around("bob", UP)) == {"alice", "carol"}, f"{alice0} {bob_quiet} {bob_on}")
+
+        cli(eCp, "enable", "--session", sid_c)
+        c_post = hook(env("carol", UP, home_cp, PASSNOTE_POLL_SECONDS=0), "post", sid_c)
+        c_stop = hook(eCp, "stop", sid_c)
+        carol_hooks = around("alice", UP)["carol"]
+        c_prompt = hook(eCp, "prompt", sid_c)
+        carol_prompt = around("alice", UP)["carol"]
+        st_p = cli(eBp, "status")
+        check("presence: post and stop hook runs make you online, a prompt hook run also sets last prompt (seconds, on "
+              "the server's clock); the hooks say nothing; status shows it",
+              carol_hooks == {"online": True, "last_prompt": None} and carol_prompt["online"] is True
+              and isinstance(carol_prompt["last_prompt"], int) and 0 <= carol_prompt["last_prompt"] < 10
+              and all(r[0] is None and r[1] == 0 for r in (c_post, c_stop, c_prompt))
+              and st_p[0] == 0 and re.search(r"you are bob; you can send to alice \(offline, no prompt seen\), carol "
+                                             r"\(online, last prompt (just now|\d+ min ago)\)", st_p[1]),
+              f"{carol_hooks} {carol_prompt} {st_p[1].strip().splitlines()[-2:-1]}")
+
+        # carol has two sessions open: the one her hooks ran in, and another; one is turned off (/passnote:disable),
+        # then the other closes (end of input, as when Claude Code quits)
+        cli(eCp, "enable", "--session", "sess-carol-2")
+        two = [Live(env("carol", UP, home_cp, CLAUDE_CODE_SESSION_ID=s, PASSNOTE_MCP_POLL_SECONDS=0.2))
+               for s in (sid_c, "sess-carol-2")]
+        rcs = []
+        try:
+            for lv in two:
+                lv.rpc(1, "initialize", protocolVersion="2025-06-18")
+                lv.say(INITIALIZED)
+                lv.rpc(2, "tools/list")
+            both = around("alice", UP)["carol"]["online"]
+            cli(eCp, "disable", "--session", "sess-carol-2")
+            n_dis = two[1].until(changed)
+            one = around("alice", UP)["carol"]["online"]
+            rcs.append(two[0].close())
+            none = around("alice", UP)["carol"]
+        finally:
+            rcs += [lv.close() for lv in two if lv.p.poll() is None]
+        # PASSNOTE_PRESENCE=0: an MCP server that sends no heartbeat and no goodbye, and whose calls are not recorded
+        quiet = Live(env("alice", UP, HOME_A, PASSNOTE_ENABLE=1, CLAUDE_CODE_SESSION_ID="sess-quiet",
+                         PASSNOTE_PRESENCE=0, PASSNOTE_HEARTBEAT_SECONDS=0.2))
+        try:
+            quiet.rpc(1, "initialize", protocolVersion="2025-06-18")
+            quiet.say(INITIALIZED)
+            quiet_tools = quiet.rpc(2, "tools/list")["result"]["tools"]
+            quiet.until(changed, 1.0)
+            alice_quiet = around("bob", UP)["alice"]
+        finally:
+            quiet.close()
+        ui1 = page.req("/api/state")[1]
+    finally:
+        page.close()
+        srvP.terminate()
+    check("presence: with two sessions open, turning one off keeps you online and closing the other makes you offline "
+          "at once (both send /bye; the hooks' calls belong to the session they ran in)",
+          both is True and n_dis is not None and one is True and none["online"] is False
+          and isinstance(none["last_prompt"], int) and rcs == [0, 0], f"{both} {one} {none} {rcs}")
+    check("presence: PASSNOTE_PRESENCE=0 in the MCP server: tools as usual, never online; ui state carries presence",
+          [t["name"] for t in quiet_tools] == THREE and alice_quiet == nobody_p
+          and ui1.get("presence", {}).get("bob") == {"online": True, "last_prompt": None}
+          and ui1["presence"].get("carol", {}).get("online") is False
+          and isinstance(ui1["presence"]["carol"].get("last_prompt"), int), f"{alice_quiet} {ui1.get('presence')}")
+
+    # the heartbeat, with ONLINE_SECONDS = 3: an idle MCP server keeps you online; someone whose session is not heard
+    # from goes offline; the answers change all the time, and the tools are not reloaded once
+    portF = free_port()
+    srvF = start(portF, script=FAST_SERVER, tokens=TOKENS_P)
+    UF = f"http://127.0.0.1:{portF}"
+    try:
+        hook(env("bob", UF, HOME_B), "prompt", sid)
+        bob_f0 = around("alice", UF)["bob"]
+        hb = Live(env("alice", UF, HOME_A, PASSNOTE_ENABLE=1, CLAUDE_CODE_SESSION_ID="sess-hb",
+                      PASSNOTE_HEARTBEAT_SECONDS=0.5))
+        try:
+            hb.rpc(1, "initialize", protocolVersion="2025-06-18")
+            hb.say(INITIALIZED)
+            hb.rpc(2, "tools/list")
+            t0 = time.time()
+            reloads = hb.until(changed, 5.0)        # about ten heartbeats
+            alice_f = around("bob", UF)["alice"]
+            bob_f1 = around("alice", UF)["bob"]
+        finally:
+            rc_hb = hb.close()
+        alice_gone = around("bob", UF)["alice"]
+    finally:
+        srvF.terminate()
+        srvF.wait(10)
+    log_f = open(os.path.join(work, f"server-{portF}.log"), encoding="utf-8").read()
+    check("heartbeat: an idle MCP server keeps you online past ONLINE_SECONDS; bob, not heard from, goes offline and his "
+          "last prompt ages; no tools/list_changed across the heartbeats; closing sends /bye",
+          bob_f0["online"] is True and alice_f["online"] is True and bob_f1["online"] is False
+          and isinstance(bob_f1["last_prompt"], int) and bob_f1["last_prompt"] >= 3 and reloads is None
+          and log_f.count("GET /whoami") >= 6 and '"POST /bye ' in log_f and rc_hb == 0
+          and alice_gone["online"] is False,
+          f"{bob_f0} {alice_f} {bob_f1} whoami x{log_f.count('GET /whoami')} in {time.time() - t0:.1f} s")
 
     # 4. unreachable server: silent and fast
     dead = env("bob", f"http://127.0.0.1:{free_port()}", HOME_B)
@@ -816,7 +1019,7 @@ if made:
         check("switching servers: init with the new URL and certificate keeps the token, so the new server knows you "
               "with the old tokens.json; status shows the new server and whom you can send to",
               c5 == 0 and c6 == 0 and out6.strip().splitlines()[-1] == line5 and f"url {U2}," in st_sw[1]
-              and "you are erin; you can send to alice, bob" in st_sw[1] and st_sw[0] == 0,
+              and re.search(r"you are erin; you can send to alice \(.*\), bob \(", st_sw[1]) and st_sw[0] == 0,
               st_sw[1].strip().splitlines()[-2:])
     finally:
         srv2.terminate()

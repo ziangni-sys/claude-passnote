@@ -18,6 +18,7 @@ Claude Code (Alice's laptop) ─┐                              ┌─ Claude C
   - Every other conversation sees no tools, gets no hook output and makes no network calls.
   - The hooks exit in a few lines of bash, without starting Python.
 - **Who is there**: `/passnote:status` shows the server, your name and whom you can send to. The `send` tool lists the same names.
+- **Who is around**: for each of the others, whether a Claude Code session of theirs with passnote on is open, and when they last sent a prompt. See [Who is around](#who-is-around).
 - **In the browser**: `/passnote:ui` opens a page on your computer where you read, send and ack messages yourself, and see whether the others have acked yours.
 
 ## Requirements
@@ -47,9 +48,9 @@ Claude Code (Alice's laptop) ─┐                              ┌─ Claude C
    - `/passnote:enable` turns it on for the current session. The hooks work at once; the MCP tools appear within a few seconds, without a restart.
    - Or start a dedicated session with `PASSNOTE_ENABLE=1`, for example `PASSNOTE_ENABLE=1 claude`, or a desktop session preset that sets it.
    - Do not set `PASSNOTE_ENABLE=1` globally, or every session will use passnote.
-5. **Check:** `/passnote:status`. It shows the server, whether it answers, your name there and whom you can send to:
+5. **Check:** `/passnote:status`. It shows the server, whether it answers, your name there, whom you can send to and whether they are around:
    ```
-   you are alice; you can send to bob, carol
+   you are alice; you can send to bob (online, last prompt 5 min ago), carol (offline, last prompt 2 h ago)
    ```
 
 Other commands:
@@ -63,8 +64,8 @@ Other commands:
 
 - **Inbox**: unread or all messages, with their type, refs and whether a reply is wanted. Reply, ack one, or ack them all.
 - **Sent**: what you and your agent sent, and whether each recipient has acked it. Replies are linked both ways.
-- **People**: whom you can write to, and how many unread messages each of them sent you.
-- **New message**: recipient, type, body (at most 1000 characters), refs, and whether you want a reply.
+- **People**: whom you can write to, how many unread messages each of them sent you, and whether they are around: a green dot when a Claude Code session of theirs with passnote on is open (grey otherwise), and when they last sent a prompt. See [Who is around](#who-is-around).
+- **New message**: recipient (those who are online are marked), type, body (at most 1000 characters), refs, and whether you want a reply.
 
 The page refreshes every 15 seconds, and the tab title shows how many messages are unread. It needs no `/passnote:enable` and uses the same name and token as this computer's agent.
 
@@ -73,6 +74,29 @@ The page refreshes every 15 seconds, and the tab title shows how many messages a
 - Stop it with Ctrl+C, or by stopping its background command in Claude Code.
 - From a terminal, in a checkout of this repository: `python3 scripts/ui.py`. `--port N` picks the port; `--no-browser` only prints the address.
 - The Sent tab needs a server running passnote 0.3.0 or later. With an older one, the tab says so and everything else works.
+- The page itself does not make you show as online: only your Claude Code sessions do.
+
+## Who is around
+
+`/passnote:status` and the web page show two things about each of the others:
+
+- **Online** (the green dot; grey when offline): a Claude Code session of theirs with passnote on is open. While it is, its MCP server tells the server so every minute. The dot turns grey 2.5 minutes after the last word, or at once when the session closes or passnote is turned off in it, unless they have another session with passnote on.
+- **Last prompt**, for example `last prompt 5 min ago`: when they last sent a prompt in such a session. Their prompt hook tells the server that they sent one, never what they wrote. `no prompt seen` means none since the server started, or in the last day.
+
+```
+you are alice; you can send to bob (online, last prompt 5 min ago), carol (offline, last prompt 2 h ago)
+```
+
+This changes nothing for the agents. No tool, tool description or hook output mentions it, so nothing about you reaches the other side's Claude, and their tools are not reloaded when it changes. It shows up only when someone runs `/passnote:status` or opens the web page.
+
+Limits:
+- Only Claude Code sessions with passnote on count. A session without it does not, and neither does the web page.
+- An open session does not mean the person is at the keyboard: a window left open overnight stays green. The last prompt tells you more.
+- When the computer sleeps or Claude Code is killed outright, the session cannot say goodbye: the dot turns grey after about 2.5 minutes.
+- The server keeps this in memory only. After it restarts, the dots are back within a minute (the next heartbeat), and each person's last prompt reappears with their next prompt.
+- People still on a plugin older than 0.4.0 send no heartbeat: they show online only for 2.5 minutes after their agent or their web page last called the server, and never with a last prompt. With a server older than 0.4.0, nobody does, and neither the status line nor the page shows any of this.
+
+**Everyone registered on the server can see this about you.** To keep it to yourself, set `PASSNOTE_PRESENCE=0` in the environment you start Claude Code from: the server then records none of your calls, and the others see you offline, with no prompt seen. You still see them.
 
 ## Running the server
 
@@ -138,7 +162,7 @@ To change a token:
 1. Delete `token` from that computer's `config.json` and run `/passnote:init` again.
 2. On the server: `python3 server.py users add NAME <new hash> --replace`.
 
-To update the server, copy the new `server.py` over and restart it once. Clients and servers of different versions work together; with a server older than 0.2.0, `/passnote:status` cannot list the others; with one older than 0.3.0, the web interface cannot show what you sent.
+To update the server, copy the new `server.py` over and restart it once. Clients and servers of different versions work together; with a server older than 0.2.0, `/passnote:status` cannot list the others; with one older than 0.3.0, the web interface cannot show what you sent; with one older than 0.4.0, nobody shows as online.
 
 ## Switching or moving the server
 
@@ -178,6 +202,8 @@ To start a new server from scratch instead, skip step 3: everyone sends their ha
 | `PASSNOTE_POLL_SECONDS` | minimum interval between inbox checks after tool calls | `20` |
 | `PASSNOTE_MCP_POLL_SECONDS` | how often the MCP server checks whether passnote was turned on or off for its session, in seconds | `2` |
 | `PASSNOTE_HOOK_TIMEOUT` | HTTP timeout of the hooks, in seconds | `1.2` |
+| `PASSNOTE_PRESENCE` | `0`: the server records none of your calls, so the others see you offline, with no prompt seen. See [Who is around](#who-is-around) | unset (on) |
+| `PASSNOTE_HEARTBEAT_SECONDS` | how often a session with passnote on tells the server that it is open, in seconds. Keep it well under 150, or you will flicker offline | `60` |
 | `PASSNOTE_PYTHON` | the Python interpreter to use, as a full path | the first of `python3`, `python`, `py` found |
 
 `PASSNOTE_HOME` is outside the plugin, so updating or uninstalling the plugin keeps your token. Delete the directory to remove it.
@@ -246,6 +272,7 @@ Only for sessions with passnote turned on.
   - The context tells the agent to ask the human before destructive actions.
   - Blocking Stop does not authorise anything; it only makes the agent look at its messages.
 - **Limits**: requests are size-limited, bodies are at most 1000 characters, and each sender can send at most 120 messages an hour.
+- **Presence**: the server keeps in memory, for at most a day, when each of your sessions last called it (named by a short hash of the session id, never the id itself) and when you last sent a prompt (never what you wrote). Everyone registered can see whether you are online and when you last sent a prompt. `PASSNOTE_PRESENCE=0` turns it off for you.
 - **Web interface**:
   - It listens on `127.0.0.1` only, and its API answers only requests that carry the key from the address it printed and name that address as `Host`. Other websites can neither send requests to it nor read its answers, by DNS rebinding either.
   - The token stays in `ui.py`; no answer contains it.
@@ -262,6 +289,8 @@ Only for sessions with passnote turned on.
 | `/passnote:status` says the others are unknown | The server runs passnote older than 0.2.0. Messages work; to list the others, update its `server.py` and restart it once |
 | The web page says "Open the address passnote printed" | It was opened without the `#key=...` part, or with the address of an earlier start. Open the address `/passnote:ui` printed last |
 | The web page's Sent tab says the server cannot list what you sent | The server runs passnote older than 0.3.0. Update its `server.py` and restart it once |
+| Someone shows offline although their Claude Code is open | passnote is not on in that session, they set `PASSNOTE_PRESENCE=0`, or their plugin is older than 0.4.0. The web page does not count, only Claude Code sessions |
+| Nobody has a dot or a last prompt | The server runs passnote older than 0.4.0. Update its `server.py` and restart it once |
 | `send` does not offer someone who was just added | The `send` tool learns new names after its next call to the server. Until then, `/passnote:mail` can send to them |
 | The `passnote` MCP server fails to start | No Python 3.9+ was found on `PATH`. `/mcp` shows the error. Install Python, or set `PASSNOTE_PYTHON` (see [Which Python is used](#which-python-is-used)) |
 | `/mcp` shows passnote as `connected · no tools` | passnote is not on for this session. Run `/passnote:enable`: the MCP server checks every 2 seconds and tells Claude Code, which loads the tools within a few seconds. If they still do not appear, select `plugin:passnote:passnote` in `/mcp` and choose Reconnect. Until then, `/passnote:mail` works |

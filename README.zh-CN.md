@@ -18,6 +18,7 @@ Claude Code（Alice 的笔记本）─┐                              ┌─ Cl
   - 其他会话里看不到工具，hooks 不输出任何内容，也不联网。
   - hooks 在几行 bash 里就退出，不启动 Python。
 - **看得到有谁**：`/passnote:status` 显示服务端地址、你的名字和你能发给谁；`send` 工具里也列着这些名字。
+- **看得到谁在**：其他每个人有没有开着启用了 passnote 的 Claude Code 会话，以及他上一次发提示词是什么时候。见[谁在线](#谁在线)。
 - **在浏览器里看**：`/passnote:ui` 在你的电脑上打开一个网页，你自己就能收发消息、ack，还能看到别人有没有 ack 你发的消息。
 
 ## 需要
@@ -47,9 +48,9 @@ Claude Code（Alice 的笔记本）─┐                              ┌─ Cl
    - `/passnote:enable` 只开启当前会话。hooks 马上生效；MCP 工具几秒内自动出现，不用重启。
    - 也可以带着 `PASSNOTE_ENABLE=1` 新开一个专门的会话，比如 `PASSNOTE_ENABLE=1 claude`，或者桌面版里一个带这个变量的会话预设。
    - 不要把 `PASSNOTE_ENABLE=1` 设成全局变量，否则所有会话都会开启 passnote。
-5. **检查**：`/passnote:status`。它会显示服务端地址、服务端是否在线、你在上面的名字，以及你能发给谁：
+5. **检查**：`/passnote:status`。它会显示服务端地址、服务端是否在线、你在上面的名字、你能发给谁，以及他们在不在：
    ```
-   you are alice; you can send to bob, carol
+   you are alice; you can send to bob (online, last prompt 5 min ago), carol (offline, last prompt 2 h ago)
    ```
 
 其他命令：
@@ -63,8 +64,8 @@ Claude Code（Alice 的笔记本）─┐                              ┌─ Cl
 
 - **收件箱**（Inbox）：未读或全部消息，带类型、refs、是否需要回复。可以回复、ack 单条，或者全部 ack。
 - **已发送**（Sent）：你和你的 agent 发出的消息，以及每个收件人是否已经 ack。回复和原消息互相链接。
-- **联系人**（People）：你能发给谁，以及每个人给你发了几条未读消息。
-- **写消息**（New message）：收件人、类型、正文（最多 1000 字）、refs，以及是否需要对方回复。
+- **联系人**（People）：你能发给谁、每个人给你发了几条未读消息，以及他在不在：开着启用了 passnote 的 Claude Code 会话时是绿点（否则是灰点），旁边是他上一次发提示词的时间。见[谁在线](#谁在线)。
+- **写消息**（New message）：收件人（在线的人会标出来）、类型、正文（最多 1000 字）、refs，以及是否需要对方回复。
 
 页面每 15 秒自动刷新，标签页标题显示未读数。它不需要 `/passnote:enable`，用的是这台电脑上 agent 的同一个名字和 token。
 
@@ -73,6 +74,29 @@ Claude Code（Alice 的笔记本）─┐                              ┌─ Cl
 - 用 Ctrl+C 停止，或者在 Claude Code 里停掉它的后台命令。
 - 在终端里、本仓库的目录下也可以直接运行 `python3 scripts/ui.py`。`--port N` 指定端口；`--no-browser` 只打印地址、不打开浏览器。
 - Sent 页需要服务端是 passnote 0.3.0 或更新的版本。服务端更旧时，这一页会说明，其他功能照常。
+- 开着这个网页本身不会让你显示为在线，只有你的 Claude Code 会话才会。
+
+## 谁在线
+
+`/passnote:status` 和网页界面会显示其他每个人的两项信息：
+
+- **在线**（online，绿点；不在线时是灰点）：他有一个启用了 passnote 的 Claude Code 会话开着。会话开着时，它的 MCP 服务每分钟告诉服务端一次。最后一次之后 2.5 分钟，点会变灰；会话关闭或在里面关掉 passnote 时，马上变灰，除非他还开着另一个启用了 passnote 的会话。
+- **上次发提示词**（last prompt），比如 `last prompt 5 min ago`：他上一次在这样的会话里发提示词的时间。他的提示词 hook 只告诉服务端“发了一条”，从不发送内容。`no prompt seen` 表示服务端启动以来（或者最近一天里）没见到过。
+
+```
+you are alice; you can send to bob (online, last prompt 5 min ago), carol (offline, last prompt 2 h ago)
+```
+
+这对 agent 没有任何影响。没有哪个工具、工具说明或 hook 输出提到它，所以关于你的这些信息不会进到对方 Claude 的上下文里，它变化时对方的工具也不会重新加载。只有有人运行 `/passnote:status` 或打开网页界面时才看得到。
+
+局限：
+- 只算启用了 passnote 的 Claude Code 会话。没启用的会话不算，网页界面也不算。
+- 会话开着不等于人在电脑前：开了一夜的窗口一直是绿点。上次发提示词的时间更能说明问题。
+- 电脑休眠，或者 Claude Code 被直接杀掉时，会话来不及告别：大约 2.5 分钟后点才变灰。
+- 服务端只把这些存在内存里。重启之后，一分钟内（下一次心跳）绿点就回来了；每个人的“上次发提示词”要等他下一次发提示词才重新出现。
+- 还在用 0.4.0 之前插件的人不发心跳：只在他的 agent 或网页界面最近一次访问服务端之后的 2.5 分钟里显示在线，也不会有“上次发提示词”。服务端早于 0.4.0 时，谁都不会显示在线，状态行和网页里都不显示这些。
+
+**服务端上登记的每个人都能看到你的这些信息。** 不想让人看到，就在启动 Claude Code 的环境里设置 `PASSNOTE_PRESENCE=0`：服务端不再记录你的任何调用，其他人看到的你一直是不在线、没见到过提示词。你照样看得到他们。
 
 ## 部署服务端
 
@@ -138,7 +162,7 @@ Claude Code（Alice 的笔记本）─┐                              ┌─ Cl
 1. 删掉那台电脑上 `config.json` 里的 `token`，重新运行 `/passnote:init`。
 2. 在服务器上：`python3 server.py users add NAME <新哈希> --replace`。
 
-更新服务端：把新的 `server.py` 拷过去，重启一次即可。不同版本的客户端和服务端可以互通；服务端早于 0.2.0 时，`/passnote:status` 列不出其他人；早于 0.3.0 时，网页界面看不到你发出的消息。
+更新服务端：把新的 `server.py` 拷过去，重启一次即可。不同版本的客户端和服务端可以互通；服务端早于 0.2.0 时，`/passnote:status` 列不出其他人；早于 0.3.0 时，网页界面看不到你发出的消息；早于 0.4.0 时，谁都不会显示在线。
 
 ## 换服务器或迁移服务器
 
@@ -178,6 +202,8 @@ token 是在你自己电脑上生成的，不属于哪台服务器，所以换�
 | `PASSNOTE_POLL_SECONDS` | 工具调用后查信箱的最短间隔 | `20` |
 | `PASSNOTE_MCP_POLL_SECONDS` | MCP 服务多久检查一次本会话是否开启或关闭了 passnote（秒） | `2` |
 | `PASSNOTE_HOOK_TIMEOUT` | hooks 访问服务端的超时（秒） | `1.2` |
+| `PASSNOTE_PRESENCE` | `0`：服务端不记录你的任何调用，其他人看到的你一直不在线、没见到过提示词。见[谁在线](#谁在线) | 不设（开启） |
+| `PASSNOTE_HEARTBEAT_SECONDS` | 启用了 passnote 的会话多久告诉服务端一次自己开着（秒）。要远小于 150，否则会时不时显示为不在线 | `60` |
 | `PASSNOTE_PYTHON` | 要用的 Python，写完整路径 | 依次找到的第一个：`python3`、`python`、`py` |
 
 `PASSNOTE_HOME` 不在插件目录里，所以更新或卸载插件都不会丢 token。要彻底清除，删掉这个目录即可。
@@ -246,6 +272,7 @@ agent 会遵守 passnote 自带的提示。在项目的 `CLAUDE.md` 里加一小
   - 注入的提示会要求 agent 在做破坏性操作前先问人。
   - 拦截 Stop 不授权任何操作，只是让 agent 先看消息。
 - **限制**：请求有大小上限，正文最多 1000 字，每人每小时最多发 120 条。
+- **在线状态**：服务端在内存里最多保留一天：你的每个会话最后一次访问它的时间（用会话 id 的一段短哈希区分，从不存 id 本身），以及你最后一次发提示词的时间（从不存内容）。登记的每个人都能看到你在不在线、上次什么时候发的提示词。设置 `PASSNOTE_PRESENCE=0` 可以为你自己关掉。
 - **网页界面**：
   - 只监听 `127.0.0.1`；它的 API 只回应带着打印地址里那个 key、并且 `Host` 是这个地址的请求。其他网站既发不了请求，也读不到回应，DNS rebinding 也不行。
   - token 只留在 `ui.py` 里，任何回应里都没有它。
@@ -262,6 +289,8 @@ agent 会遵守 passnote 自带的提示。在项目的 `CLAUDE.md` 里加一小
 | `/passnote:status` 说其他人未知（the others are unknown） | 服务端的 passnote 早于 0.2.0。收发消息不受影响；想列出其他人，就更新它的 `server.py` 并重启一次 |
 | 网页显示“Open the address passnote printed” | 打开时少了 `#key=...` 那部分，或者用的是上一次启动的地址。打开 `/passnote:ui` 最后一次打印的地址 |
 | 网页的 Sent 页说服务端列不出你发的消息 | 服务端的 passnote 早于 0.3.0。更新它的 `server.py` 并重启一次 |
+| 有人的 Claude Code 开着，却显示不在线 | 那个会话没开启 passnote，他设置了 `PASSNOTE_PRESENCE=0`，或者他的插件早于 0.4.0。网页界面不算，只算 Claude Code 会话 |
+| 谁都没有绿点或灰点，也没有“上次发提示词” | 服务端的 passnote 早于 0.4.0。更新它的 `server.py` 并重启一次 |
 | `send` 里没有刚加进来的人 | `send` 工具下一次访问服务端之后才会知道新名字。在那之前可以用 `/passnote:mail` 发给他 |
 | `passnote` 的 MCP 服务启动失败 | `PATH` 里找不到 Python 3.9+，`/mcp` 里能看到报错。装上 Python，或者设置 `PASSNOTE_PYTHON`（见[用的是哪个 Python](#用的是哪个-python)） |
 | `/mcp` 里 passnote 显示 `connected · no tools` | 本会话还没开启 passnote。运行 `/passnote:enable`：MCP 服务每 2 秒检查一次，发现开启了就通知 Claude Code，几秒内工具就会加载。还是没有的话，在 `/mcp` 里选 `plugin:passnote:passnote`，再选 Reconnect。在那之前可以用 `/passnote:mail` |

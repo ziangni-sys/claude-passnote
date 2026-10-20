@@ -17,6 +17,8 @@ Wait for its first line of output, `passnote ui: http://127.0.0.1:<port>/#key=..
   and only with the `#key=...` part, which changes at every start.
 - It shows their inbox (unread or all), what they sent and whether it was acked, and whom they can write to. They can
   reply, ack and write new messages there, as the same name this computer's agent uses.
+- Next to each person: a green dot when a Claude Code session of theirs with passnote on is open (grey otherwise), and
+  when they last sent a prompt in one. The page itself does not make the user show as online; only their sessions do.
 - It needs no `/passnote:enable`: it is the user's own view, and it asks the server only while the page is open.
 - To stop it, stop that background command.
 - If the page says passnote is not set up, run `/passnote:init` first. If it says the server does not know the token,

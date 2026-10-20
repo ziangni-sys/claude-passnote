@@ -15,6 +15,10 @@ and make no network calls:
   python3 client.py enable      adds the current session (--session, else CLAUDE_CODE_SESSION_ID) to
                                 PASSNOTE_HOME/sessions; the /passnote:enable command does this
   PASSNOTE_ENABLE=0             forces it off.
+Presence (server.py: whether you are around): each call says whether it comes from the Claude side or the web page
+(KIND), which session it belongs to (a short SHA-256 prefix of the session id, never the id) and, from the
+UserPromptSubmit hook, that you sent a prompt (never what you wrote). With
+  PASSNOTE_PRESENCE=0           the server records none of your calls: the others see you offline, with no prompt seen.
 
 usage: python3 client.py {init,hash,enable,disable,status,inbox,send,ack} ...
   init --name NAME --url URL [--ca CERT]
@@ -26,6 +30,7 @@ usage: python3 client.py {init,hash,enable,disable,status,inbox,send,ack} ...
   status                        this session, the configuration, and who you are and whom you can write to
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -38,6 +43,9 @@ import urllib.request
 TYPES = ("info", "request", "interface_change", "claim", "done")
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}\Z")     # what server.py users add accepts
 NAME_RULE = "1 to 40 ASCII letters, digits, '.', '_' or '-', starting with a letter or digit"
+KIND = "claude"             # who calls, for presence: "claude" (MCP server, hooks, command line) or "ui" (ui.py sets
+                            # it: the web page does not make you online)
+SESSION = None              # the session these calls belong to (None: session_id(); hook.py sets the one of its input)
 
 
 class PassnoteError(Exception):
@@ -95,14 +103,22 @@ def configured():
     return bool(c["url"] and c["token"])
 
 
-def call(method, path, payload=None, timeout=5.0):
-    """One request to the server -> the decoded JSON. Raises PassnoteError (not configured, unreachable, rejected)."""
+def call(method, path, payload=None, timeout=5.0, event=None):
+    """One request to the server -> the decoded JSON. Raises PassnoteError (not configured, unreachable, rejected).
+    event: "prompt" tells the server that you just sent a prompt (presence)."""
     c = config()
     if not (c["url"] and c["token"]):
         raise PassnoteError("passnote is not configured: run /passnote:init (or set PASSNOTE_URL and PASSNOTE_TOKEN)")
     data = None if payload is None else json.dumps(payload).encode()
-    req = urllib.request.Request(c["url"] + path, data=data, method=method,
-                                 headers={"Authorization": "Bearer " + c["token"], "Content-Type": "application/json"})
+    headers = {"Authorization": "Bearer " + c["token"], "Content-Type": "application/json", "X-Passnote-Client": KIND}
+    sid = session_id(SESSION)
+    if sid:
+        headers["X-Passnote-Session"] = hashlib.sha256(sid.encode()).hexdigest()[:16]
+    if os.environ.get("PASSNOTE_PRESENCE", "") == "0":
+        headers["X-Passnote-Presence"] = "off"
+    if event:
+        headers["X-Passnote-Event"] = event
+    req = urllib.request.Request(c["url"] + path, data=data, method=method, headers=headers)
     ctx = None
     if c["url"].startswith("https://"):
         if c["ca"] and not os.path.exists(c["ca"]):
@@ -131,8 +147,9 @@ def send(to, type, body, refs=(), needs_reply=False, reply_to=None, timeout=5.0)
     return call("POST", "/send", p, timeout)
 
 
-def inbox(include_acked=False, limit=50, timeout=5.0):
-    return call("GET", f"/inbox?include_acked={int(bool(include_acked))}&limit={int(limit)}", timeout=timeout)["messages"]
+def inbox(include_acked=False, limit=50, timeout=5.0, event=None):
+    return call("GET", f"/inbox?include_acked={int(bool(include_acked))}&limit={int(limit)}", timeout=timeout,
+                event=event)["messages"]
 
 
 def sent(limit=50, timeout=5.0):
@@ -147,7 +164,10 @@ def ack(ids, timeout=5.0):
 
 def whoami(timeout=5.0):
     """-> {"user": your name on the server, "peers": the others' names, or None when the server is older than 0.2.0
-    and cannot list them (it answers /whoami with 404; its /inbox still names the caller)}."""
+    and cannot list them (it answers /whoami with 404; its /inbox still names the caller), "presence": {name:
+    {"online": a Claude Code session of theirs with passnote on was heard from in the last 2.5 minutes, "last_prompt":
+    seconds since they last sent a prompt in one, or None}} for the others, or None when the server is older than 0.4.0}.
+    """
     try:
         w = call("GET", "/whoami", timeout=timeout)
     except PassnoteError as e:
@@ -158,22 +178,56 @@ def whoami(timeout=5.0):
     if not isinstance(w, dict) or not isinstance(w.get("user"), str) or \
             not (w.get("peers") is None or isinstance(w["peers"], list)):
         raise PassnoteError(f"unexpected answer from the server: {w}")
-    return {"user": w["user"], "peers": None if w["peers"] is None else [str(p) for p in w["peers"]]}
+    presence = None
+    if isinstance(w.get("presence"), dict):
+        presence = {}
+        for name, v in w["presence"].items():
+            if isinstance(v, dict):
+                last = v.get("last_prompt")
+                ok = isinstance(last, int) and not isinstance(last, bool) and last >= 0
+                presence[str(name)] = {"online": v.get("online") is True, "last_prompt": last if ok else None}
+    return {"user": w["user"], "peers": None if w["peers"] is None else [str(p) for p in w["peers"]],
+            "presence": presence}
+
+
+def ago(seconds):
+    """seconds -> "just now", "5 min ago", "2 h ago", as the web page says it."""
+    if seconds < 45:
+        return "just now"
+    if seconds < 3600:
+        return f"{max(1, round(seconds / 60))} min ago"
+    if seconds < 86400:
+        return f"{round(seconds / 3600)} h ago"
+    return f"{round(seconds / 86400)} d ago"
 
 
 def describe(who):
-    """whoami() -> one line for people."""
+    """whoami() -> one line for people: "you are alice; you can send to bob (online, last prompt 5 min ago), ..."."""
     if who["peers"] is None:
         return (f"you are {who['user']}; the others are unknown (this server is older than passnote 0.2.0 and does not "
                 "list them)")
     if not who["peers"]:
         return f"you are {who['user']}; nobody else is registered on this server yet"
-    return f"you are {who['user']}; you can send to {', '.join(who['peers'])}"
+    presence = who.get("presence") or {}
+
+    def peer(name):
+        p = presence.get(name)
+        if p is None:           # a server older than 0.4.0
+            return name
+        last = "no prompt seen" if p["last_prompt"] is None else f"last prompt {ago(p['last_prompt'])}"
+        return f"{name} ({'online' if p['online'] else 'offline'}, {last})"
+    return f"you are {who['user']}; you can send to {', '.join(peer(p) for p in who['peers'])}"
+
+
+def bye(timeout=1.0):
+    """This session closes, or no longer has passnote on: the server stops counting it as online at once (the others
+    still see you online while another session of yours is open). Raises PassnoteError; a server older than 0.4.0
+    answers 404."""
+    return call("POST", "/bye", {}, timeout)
 
 
 def token_line(name):
     """The line for the server's tokens.json, '"name": "<SHA-256 of your token>"' (the hash is not secret)."""
-    import hashlib
     token = config()["token"]
     if not token:
         raise PassnoteError("no token yet: run /passnote:init first")
@@ -195,7 +249,6 @@ def init(name, url, ca=""):
     tokens.json line with its SHA-256, which is all the server needs (the hash is not secret). An existing token is kept,
     so running it again with another URL or certificate switches servers. ca: the server's certificate, copied to
     PASSNOTE_HOME/ca.pem."""
-    import hashlib
     import secrets
     if not NAME.match(name):
         raise PassnoteError(f"bad name {name!r}: {NAME_RULE}")

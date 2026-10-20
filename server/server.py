@@ -19,8 +19,12 @@ server reads tokens.json again whenever the file changes (users add / remove, or
 
 API (JSON; every call except /health needs "Authorization: Bearer <token>"):
   GET  /health                                         -> {"ok": true}
-  GET  /whoami                                         -> {"user", "peers"}    the caller's name and everybody else's
-                                                                               (since 0.2.0; older servers answer 404)
+  GET  /whoami                                         -> {"user", "peers", "presence"}  the caller's name and
+                                                                               everybody else's (since 0.2.0; older
+                                                                               servers answer 404), and whether each of
+                                                                               the others is around (since 0.4.0):
+                                                                               {peer: {"online", "last_prompt"}}, see
+                                                                               Presence below
   POST /send   {to, type, body, refs?, needs_reply?, reply_to?}
                                                        -> {"id", "created_at"}
   GET  /inbox?include_acked=0&limit=50                 -> {"user", "messages": [...]}  addressed to the caller,
@@ -30,9 +34,21 @@ API (JSON; every call except /health needs "Authorization: Bearer <token>"):
                                                                                acked it (since 0.3.0; older servers
                                                                                answer 404)
   POST /ack    {"ids": [...]}                          -> {"acked": n}         only messages addressed to the caller
+  POST /bye                                            -> {"ok": true}         the calling session closes: it stops
+                                                                               counting as online at once (since 0.4.0)
 A message: {id, from, to, type, body, refs, needs_reply, reply_to, created_at, acked, acked_at}; type is one of
 info / request / interface_change / claim / done; body at most MAX_BODY characters (details go into a file the
 message refers to).
+Presence (since 0.4.0), kept in memory only (a restart forgets it) and computed on the server's clock, so clients'
+clocks do not matter. Every authenticated request records it, unless it carries "X-Passnote-Presence: off":
+  online        a request from that person's Claude side came within ONLINE_SECONDS (about 2.5 of the MCP server's
+                heartbeats), from any of their sessions. "X-Passnote-Client: ui" marks the requests of the web page,
+                which do not count; any other value, or none (older clients), is the Claude side.
+                "X-Passnote-Session" names the session (a short SHA-256 prefix of its id; "-" when missing), so that
+                /bye ends only that one and other sessions of the same person keep them online.
+  last_prompt   whole seconds since a request with "X-Passnote-Event: prompt" (the UserPromptSubmit hook's) came from
+                that person, or null if none did.
+Entries older than FORGET_SECONDS are dropped.
 """
 import argparse
 import hashlib
@@ -56,8 +72,12 @@ MAX_BODY = 1000             # characters
 MAX_REFS, MAX_REF = 10, 200
 MAX_REQUEST = 16 * 1024     # bytes
 SEND_PER_HOUR = 120         # per sender
+ONLINE_SECONDS = 150        # presence: about 2.5 heartbeats (mcp_server.py sends one a minute)
+FORGET_SECONDS = 86400      # presence older than a day is dropped
+MAX_SESSIONS = 20           # presence: the most recent sessions kept per user
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}\Z")     # names users add accepts (client.py init: the same rule)
 HASH = re.compile(r"[0-9a-f]{64}\Z")
+SESSION = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")              # X-Passnote-Session values kept as they are, else "-"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 SCHEMA = """
@@ -178,10 +198,50 @@ class Store:
             return cur.rowcount
 
 
+class Presence:
+    """Who is around (module docstring: Presence), in memory only. Times are time.monotonic(), so a change of the
+    server's clock does not shift them."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.seen = {}          # user -> {session: time of its last request from the Claude side}
+        self.prompt = {}        # user -> time of their last prompt
+
+    def record(self, user, session, claude, prompt):
+        t = time.monotonic()
+        with self.lock:
+            if claude:
+                s = self.seen.setdefault(user, {})
+                s[session] = t
+                if len(s) > MAX_SESSIONS:
+                    del s[min(s, key=s.get)]
+            if prompt:
+                self.prompt[user] = t
+
+    def bye(self, user, session):
+        with self.lock:
+            s = self.seen.get(user, {})
+            s.pop(session, None)
+            if not s:
+                self.seen.pop(user, None)
+
+    def of(self, names):
+        """-> {name: {"online": bool, "last_prompt": whole seconds since their last prompt, or None}}"""
+        t = time.monotonic()
+        with self.lock:
+            for user in list(self.seen):
+                self.seen[user] = {k: v for k, v in self.seen[user].items() if t - v < FORGET_SECONDS}
+                if not self.seen[user]:
+                    del self.seen[user]
+            self.prompt = {k: v for k, v in self.prompt.items() if t - v < FORGET_SECONDS}
+            return {n: {"online": any(t - v < ONLINE_SECONDS for v in self.seen.get(n, {}).values()),
+                        "last_prompt": int(t - self.prompt[n]) if n in self.prompt else None} for n in names}
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "passnote/1"
     timeout = 10                # per connection (also bounds the TLS handshake, which runs in the handler's thread)
-    store = users = None        # set in serve(): Store, Users
+    store = users = presence = None     # set in serve(): Store, Users, Presence
     sent = {}                   # sender -> send timestamps of the last hour
 
     def log_message(self, fmt, *args):     # method, path and status only: never tokens or bodies
@@ -205,6 +265,17 @@ class Handler(BaseHTTPRequestHandler):
                 return name
         return None
 
+    def session(self):
+        s = self.headers.get("X-Passnote-Session", "")
+        return s if SESSION.match(s) else "-"
+
+    def note(self, user):
+        """Record this request of user's for presence, unless it asks not to be."""
+        h = self.headers
+        if h.get("X-Passnote-Presence", "").strip().lower() != "off":
+            self.presence.record(user, self.session(), h.get("X-Passnote-Client", "").strip().lower() != "ui",
+                                 h.get("X-Passnote-Event", "").strip().lower() == "prompt")
+
     def payload(self):
         n = int(self.headers.get("Content-Length") or 0)
         if n > MAX_REQUEST:
@@ -221,8 +292,10 @@ class Handler(BaseHTTPRequestHandler):
         user = self.user()
         if user is None:
             return self.reply(401, {"error": "unauthorized"})
+        self.note(user)
         if u.path == "/whoami":
-            return self.reply(200, {"user": user, "peers": sorted(n for n in self.users.current() if n != user)})
+            peers = sorted(n for n in self.users.current() if n != user)
+            return self.reply(200, {"user": user, "peers": peers, "presence": self.presence.of(peers)})
         if u.path not in ("/inbox", "/sent"):
             return self.reply(404, {"error": "not found"})
         q = parse_qs(u.query)
@@ -239,6 +312,10 @@ class Handler(BaseHTTPRequestHandler):
         user = self.user()
         if user is None:
             return self.reply(401, {"error": "unauthorized"})
+        if self.path == "/bye":
+            self.presence.bye(user, self.session())
+            return self.reply(200, {"ok": True})
+        self.note(user)
         try:
             p = self.payload()
             if self.path == "/send":
@@ -284,7 +361,7 @@ def serve(a):
         users = Users(a.tokens)
     except (OSError, ValueError) as e:
         sys.exit(f"{a.tokens}: {e}")
-    Handler.store, Handler.users = Store(a.db), users
+    Handler.store, Handler.users, Handler.presence = Store(a.db), users, Presence()
     host, port = a.bind.rsplit(":", 1)
     httpd = ThreadingHTTPServer((host, int(port)), Handler)
     scheme = "http"

@@ -7,11 +7,13 @@ sent and whether it was acked, and whom they can write to. Standard library only
 It serves the files in ui/ on 127.0.0.1 only, never on another interface, and answers the page's API by calling the
 passnote server with this computer's config.json (client.py). The token stays in this process: no answer contains it.
   GET  /api/state           -> {"configured", "url", "name", "certificate", "home", "error", "code", "line",
-                                "user", "peers", "inbox": [...], "sent": [...] or null}
+                                "user", "peers", "presence", "inbox": [...], "sent": [...] or null}
                                error and code say why the server could not be asked (code: its HTTP status, if it
                                answered; line: your tokens.json line when it does not know your token); then user,
-                               peers, inbox and sent are missing. inbox: the latest messages to you and all unread
-                               ones, oldest first; sent: the latest you sent, null for a server older than 0.3.0
+                               peers, presence, inbox and sent are missing. presence: whether each of the others is
+                               around, {name: {"online", "last_prompt"}} as the server's /whoami gives it, null for a
+                               server older than 0.4.0; inbox: the latest messages to you and all unread ones, oldest
+                               first; sent: the latest you sent, null for a server older than 0.3.0
   POST /api/send {to, type, body, refs?, needs_reply?, reply_to?}  -> {"id", "created_at"}
   POST /api/ack  {ids}      -> {"acked": n}
   A failed call answers {"error"}: 400 for a bad request from the page, 502 when the passnote server refused it or
@@ -21,7 +23,9 @@ browser sends nowhere; the page sends it back in the X-Passnote-Key header of ea
 a Host header other than this address, the answer is 403, so other websites open in the same browser can neither read
 nor send messages (cross-site requests, DNS rebinding). The page puts everything it gets into the document as text,
 never as HTML, and the Content-Security-Policy allows no inline or foreign scripts.
-It is the human's own view: it needs no /passnote:enable, and it calls the server only while the page is open.
+It is the human's own view: it needs no /passnote:enable, and it calls the server only while the page is open. Its
+calls are marked as the web page's (client.KIND "ui"), so an open page does not make you online for the others: only a
+Claude Code session with passnote on does.
 """
 import argparse
 import hmac
@@ -37,6 +41,7 @@ from urllib.parse import urlparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import client  # noqa: E402
 
+client.KIND = "ui"
 PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui")
 FILES = {"/": ("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "text/javascript; charset=utf-8"),
          "/style.css": ("style.css", "text/css; charset=utf-8"), "/icon.svg": ("icon.svg", "image/svg+xml")}
@@ -70,7 +75,8 @@ def state():
             out["line"] = client.token_line(c["name"] or "<your name>")
         return out
     inbox = {m["id"]: m for m in recent + unread}
-    out.update(user=who["user"], peers=who["peers"], inbox=[inbox[i] for i in sorted(inbox)], sent=sent)
+    out.update(user=who["user"], peers=who["peers"], presence=who["presence"], inbox=[inbox[i] for i in sorted(inbox)],
+               sent=sent)
     return out
 
 

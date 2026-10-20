@@ -1,6 +1,6 @@
 ---
 name: status
-description: Check passnote - whether this session has it on, which server it uses, whether the server answers, and who you are and whom you can send to there
+description: Check passnote - whether this session has it on, which server it uses, whether the server answers, who you are and whom you can send to there, and whether each of them is around
 ---
 
 Check passnote for this session. Run this (if `python3` is not found, use `python`, or `py` on Windows):
@@ -10,7 +10,19 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/client.py" status --session "${CLAUDE_SES
 ```
 
 Report the result in a few lines: whether passnote is on here, the server (`url`), and who the user is there and whom
-they can send to (`you are ...; you can send to ...`). If something is missing, give the fix:
+they can send to (`you are ...; you can send to ...`). After each name the server says whether that person is around,
+for example `bob (online, last prompt 5 min ago)`:
+
+- `online`: a Claude Code session of theirs with passnote on is open (it was heard from in the last 2.5 minutes).
+  `offline`: none is. An open session does not mean they are at the keyboard; the last prompt says more.
+- `last prompt 5 min ago`: when they last sent a prompt in such a session. `no prompt seen`: none since the server
+  started, or in the last day.
+- Only sessions with passnote on count, and the web page does not. A computer that sleeps, or a Claude Code that is
+  killed, goes offline after about 2.5 minutes. After a server restart, people are back online within a minute, and their
+  last prompt shows again after their next one.
+- No parentheses after the names: the server runs passnote older than 0.4.0, which does not keep this.
+
+If something is missing, give the fix:
 
 - `configured False`: run `/passnote:init <name> <server-url> [cert.pem]`.
 - `enabled False`: run `/passnote:enable` (only if the user wants this session to use passnote).
