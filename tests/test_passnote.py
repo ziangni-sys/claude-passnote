@@ -2,7 +2,7 @@
 plugin's own configuration): starts the real server on 127.0.0.1 (plain HTTP, and HTTPS with a self-signed certificate
 when openssl can make one) with a temporary database, then checks the API (auth, sender from the token, validation,
 reply_to, ack only own messages, whoami, sent), who is there (status, hash, stats; users add / remove on a running server, no
-restart; a server older than 0.2.0 without /whoami), the MCP server (no tools unless the session opted in; send /
+restart; a server older than 0.2.0 without /whoami), messages list / delete on a running server, the MCP server (no tools unless the session opted in; send /
 read_inbox / ack; the others' names in send's `to`, also after someone is added; tools that appear and go away when the
 session is turned on or off while the server runs), the hooks (silent unless opted in; each message shown once; Stop
 blocks once per message; unreachable or wrong-certificate server: silent and fast), the web interface (ui.py: its API,
@@ -955,6 +955,93 @@ s_moved = admin("stats", "--db", os.path.join(moved, "passnote.db"), "--tokens",
 check("stats of a database nobody has open: works, same numbers, no files created",
       s_old[0] == 0 and s_moved[0] == 0 and json.loads(s_moved[1]) == json.loads(s_old[1])
       and json.loads(s_old[1])["alice"]["sent"] >= 2 and os.listdir(moved) == ["passnote.db"], os.listdir(moved))
+
+# 5b. server.py messages list / delete on the database of a running server (its own, so that the rest keeps its
+# messages)
+port3 = free_port()
+srv3 = start(port3)
+U3, db3 = f"http://127.0.0.1:{port3}", os.path.join(work, f"m{port3}.db")
+eA3, eB3 = env("alice", U3, HOME_A), env("bob", U3, HOME_B)
+
+
+def messages(*args):
+    c, out = admin("messages", *args)
+    return c, out.replace("\r\n", "\n")         # print's line ends on Windows
+
+
+def listed(out):
+    return [int(x) for x in re.findall(r"^ *(\d+)  \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ  ", out, re.M)]
+
+
+def post(path, user, obj):
+    req = urllib.request.Request(U3 + path, method="POST", headers={"Authorization": "Bearer " + TOK[user]},
+                                 data=json.dumps(obj).encode())
+    return json.loads(urllib.request.urlopen(req, timeout=5).read())
+
+
+def mailbox(user):
+    return [m["id"] for m in get(U3, "/inbox?include_acked=1&limit=200", TOK[user])[1]["messages"]]
+
+
+try:
+    # a mailbox that has been used for a while: acks make rows longer and the table's pages split, and each time
+    # SQLite leaves the old copy of a row in the free space of a page
+    notes = [post("/send", "alice", {"to": "bob", "type": "info", "body": b})
+             for b in ("note-0 测试", "note-1 测试", "note-2 \x1b[2K\x07tail")]
+    bulk = [post("/send", "alice", {"to": "bob", "type": "info", "body": f"bulk-{i:03d} " + "y" * 40})["id"]
+            for i in range(80)]
+    secret = post("/send", "bob", {"to": "alice", "type": "request", "body": "secret-to-forget " + "x" * 80})["id"]
+    ids = [m["id"] for m in notes]
+    every = ids + bulk + [secret]
+    post("/ack", "bob", {"ids": ids[:1] + bulk[:60]})
+    files3 = db_files(db3)
+    l_all = messages("list", "--db", db3)
+    picked = [listed(messages("list", "--db", db3, *which)[1]) for which in (
+        ("--user", "alice", "--acked"), ("--user", "carol"), ("--user", "bob", "--acked", str(bulk[0]), str(ids[1])),
+        ("--before", notes[0]["created_at"]), ("--before", "2999-01-01"), ("--before", "0026-10-16"))]
+    no_which = messages("delete", "--db", db3)
+    all_and = messages("delete", "--db", db3, "--all", "--acked")
+    dry = messages("delete", "--db", db3, str(secret), str(ids[1]))
+    check("messages list: id, time, from -> to, type, acked or unread, the start of the body (control characters as ?), "
+          "picked by ids, --user, --acked and --before (strictly before; a year below 1000 too), read-only; delete "
+          "without --yes only shows what it would delete, and needs ids, filters or --all alone",
+          l_all[0] == 0 and listed(l_all[1]) == every and f"{len(every)} message(s)" in l_all[1]
+          and re.search(rf"^ *{ids[0]}  \S+  alice -> bob  info  acked  note-0 测试$", l_all[1], re.M)
+          and f"bob -> alice  request  unread  secret-to-forget {'x' * 43}...\n" in l_all[1]
+          and "  note-2 ?[2K?tail\n" in l_all[1] and "\x1b" not in l_all[1]
+          and picked == [ids[:1] + bulk[:60], [], [bulk[0]], [], every, []]
+          and no_which[0] != 0 and "--all" in no_which[1] and all_and[0] != 0
+          and dry[0] == 0 and listed(dry[1]) == [ids[1], secret] and "2 message(s) would be deleted" in dry[1]
+          and db_files(db3) == files3 and len(mailbox("bob")) == len(every) - 1, picked)
+
+    d_acked = messages("delete", "--db", db3, "--acked", "--yes")
+    d_none = messages("delete", "--db", db3, "--user", "bob", "--before", "2000-01-01", "--yes")
+    d_last = messages("delete", "--db", db3, str(secret), "--yes")
+    raw = b"".join(open(p, "rb").read() for p in (db3, db3 + "-wal") if os.path.exists(p))
+    gone = [b"note-0", b"secret-to-forget"] + [f"bulk-{i:03d} ".encode() for i in range(60)]
+    kept = [f"bulk-{i:03d} ".encode() for i in range(60, 80)]
+    after = post("/send", "alice", {"to": "bob", "type": "info", "body": "after the delete"})
+    check("messages delete --yes, the server running: deletes what it lists and nothing else, the text of every deleted "
+          "message (read ones too) is gone from passnote.db and its -wal file, the server goes on and never reuses an id",
+          d_acked[0] == 0 and listed(d_acked[1]) == ids[:1] + bulk[:60] and "deleted 61 message(s)" in d_acked[1]
+          and d_none[0] == 0 and "deleted 0 message(s)" in d_none[1]
+          and d_last[0] == 0 and listed(d_last[1]) == [secret] and "busy" not in d_acked[1] + d_last[1]
+          and not [t for t in gone if t in raw] and all(t in raw for t in kept)
+          and mailbox("bob") == ids[1:] + bulk[60:] + [after["id"]] and mailbox("alice") == [] and after["id"] > secret,
+          f"left behind: {[t for t in gone if t in raw][:5]} | {d_acked[1].strip().splitlines()[-1]}")
+
+    d_all = messages("delete", "--db", db3, "--all", "--yes")
+    bad_time = messages("list", "--db", db3, "--before", "yesterday")
+    nowhere = os.path.join(work, "nowhere", "passnote.db")
+    no_db = messages("delete", "--db", nowhere, "--all", "--yes")
+    check("messages delete --all --yes empties the mailbox; a time that is not one, or a database that is not there, is "
+          "refused (and none is created)",
+          d_all[0] == 0 and "deleted 23 message(s)" in d_all[1] and mailbox("bob") == []
+          and bad_time[0] != 0 and "2026-10-16" in bad_time[1]
+          and no_db[0] != 0 and "no database" in no_db[1] and not os.path.exists(os.path.dirname(nowhere)))
+finally:
+    srv3.terminate()
+    srv3.wait(10)
 
 # 6. the plugin's files agree with each other: every ${CLAUDE_PLUGIN_ROOT}/... path exists, skills are named after their
 # directory, the manifest and the MCP server have the same version, the server and the client accept the same names

@@ -162,6 +162,24 @@ To change a token:
 1. Delete `token` from that computer's `config.json` and run `/passnote:init` again.
 2. On the server: `python3 server.py users add NAME <new hash> --replace`.
 
+### Deleting messages
+
+Messages stay in the database until you delete them, for example the test messages from setting passnote up. On the server, in `~/passnote`:
+
+| Command | What it does |
+|---|---|
+| `python3 server.py messages list` | every message: id, time, sender and recipient, type, acked or unread, and the start of the body. It only reads the database |
+| `python3 server.py messages delete 3 4 7` | shows the messages it would delete; add `--yes` to delete them |
+
+Pick messages by id, or with `--before 2026-10-16` (sent before that day, UTC; a time such as `2026-10-16T08:00:00Z` works too), `--user NAME` (sent by or to NAME) and `--acked` (only those their recipient has acked). Given together, all of them must hold. `list` takes the same options. `delete --all` picks every message.
+
+- It works while the server runs; no restart. `delete --yes` lists exactly the messages it deleted, so a message that arrives meanwhile is never deleted unseen.
+- Deleting is for good: the command then rebuilds the database from the messages that are left and empties its `-wal` file, so the text of deleted messages stays in neither, not even the old copies SQLite leaves behind when a message is acked. Backups you made still have it. If another program keeps the database busy for long (a `sqlite3` shell, a backup), the command says so; run it again once that program is done.
+- Ids are never reused, so agents and their hooks do not take a new message for one they have already seen.
+- An unread message you delete is gone from its recipient's inbox before they see it.
+- `messages` works on the database of any passnote version, so you can copy the new `server.py` next to an older server and use it before restarting that.
+- `--db` names another database, for example one the server was started with under another name.
+
 To update the server, copy the new `server.py` over and restart it once. Clients and servers of different versions work together; with a server older than 0.2.0, `/passnote:status` cannot list the others; with one older than 0.3.0, the web interface cannot show what you sent; with one older than 0.4.0, nobody shows as online.
 
 ## Switching or moving the server
