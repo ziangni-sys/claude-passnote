@@ -9,9 +9,16 @@ usage:
                                                changes the hash of a name that is already there, e.g. a new token)
   python3 server.py users remove NAME
   python3 server.py stats [--json]             per user: unread, received and sent messages, last activity (read-only)
+  python3 server.py messages list [WHICH]      the messages: id, time, from -> to, type, acked or unread, the start of
+                                               the body (read-only)
+  python3 server.py messages delete WHICH      delete them for good, also while the server runs; without --yes it only
+                                               shows what it would delete. WHICH: message ids, --before TIME (UTC:
+                                               2026-10-16 or 2026-10-16T08:00:00Z), --user NAME (from or to), --acked
+                                               (only acked ones); together, all of them must hold. --all: every message
   python3 server.py gen-token NAME             new token for NAME (give it to that person) and the line for tokens.json;
                                                usually each person runs /passnote:init instead and sends only that line
-users and stats use the tokens.json and passnote.db next to this script unless --tokens / --db name others.
+users, stats and messages use the tokens.json and passnote.db next to this script unless --tokens / --db name others.
+Message ids are never reused, also after a delete (AUTOINCREMENT), so the hooks' record of what they showed stays right.
 
 tokens.json maps each name to the SHA-256 of that person's token ({"alice": "<hex>", "bob": "<hex>"}); the server never
 stores tokens. The sender of a message is the owner of the token, so nobody can send in someone else's name. The running
@@ -442,15 +449,26 @@ def users_cmd(a):
     print(f"{verb} {name} in {path}; a running server accepts the token at once")
 
 
+def open_db(path, write=False):
+    """The database for stats and messages: read-only unless write, and never a new, empty one."""
+    if not os.path.isfile(path):
+        sys.exit(f"no database at {path}")
+    if write:
+        mode = "mode=rw"
+    else:
+        # a running server keeps passnote.db-wal open: read alongside it; without one nothing writes the file, and
+        # immutable=1 reads it without creating -wal / -shm files (which, made by root, would lock the server out)
+        mode = "mode=ro" if os.path.exists(path + "-wal") else "immutable=1"
+    try:
+        return sqlite3.connect(pathlib.Path(path).resolve().as_uri() + "?" + mode, uri=True, timeout=10)
+    except sqlite3.Error as e:
+        sys.exit(f"{path}: {e}")
+
+
 def stats(a):
     """Per user, from the database opened read-only: unread, received and sent messages, and when they last sent or
     acked a message (reading the inbox leaves no trace in the database)."""
-    if not os.path.isfile(a.db):
-        sys.exit(f"no database at {a.db}")
-    # a running server keeps passnote.db-wal open: read alongside it; without one nothing writes the file, and
-    # immutable=1 reads it without creating -wal / -shm files (which, made by root, would lock the server out)
-    mode = "mode=ro" if os.path.exists(a.db + "-wal") else "immutable=1"
-    db = sqlite3.connect(pathlib.Path(a.db).resolve().as_uri() + "?" + mode, uri=True)
+    db = open_db(a.db)
     try:
         rows = db.execute(
             "SELECT name, SUM(unread), SUM(received), SUM(sent), MAX(last) FROM ("
@@ -480,6 +498,92 @@ def stats(a):
         print(f"({a.tokens} not readable: only users with messages are listed)")
 
 
+def moment(text):
+    """--before: "2026-10-16" (midnight UTC) or "2026-10-16T08:00:00Z" -> created_at's format, which sorts as text."""
+    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            # not strftime: on Linux its %Y gives year 26 as "26", which sorts after every "2026-..."
+            return datetime.strptime(text, fmt).isoformat(timespec="seconds") + "Z"
+        except ValueError:
+            pass
+    raise argparse.ArgumentTypeError(f"{text!r}: a UTC date or time, such as 2026-10-16 or 2026-10-16T08:00:00Z")
+
+
+def shown(text):
+    """text for one line of the operator's terminal: runs of whitespace as one space, other control characters (escape
+    sequences that could rewrite the screen, bidi overrides) as '?'."""
+    return "".join(c if c.isprintable() else "?" for c in " ".join(text.split()))
+
+
+def messages_cmd(a):
+    """List the messages WHICH picks (module docstring), or delete them. A delete shows the messages it deletes, picked
+    and deleted in one transaction, so a message arriving meanwhile is neither deleted unseen nor listed and kept."""
+    where, params = [], []
+    if a.ids:
+        where.append(f"id IN ({','.join('?' * len(a.ids))})")
+        params += a.ids
+    if a.before:
+        where.append("created_at < ?")
+        params.append(a.before)
+    if a.user:
+        where.append("(sender = ? OR recipient = ?)")
+        params += [a.user, a.user]
+    if a.acked:
+        where.append("acked_at IS NOT NULL")
+    delete = a.action == "delete"
+    if delete and a.all == bool(where):
+        sys.exit("say which messages to delete: ids, --before, --user or --acked; or --all for every message, alone")
+    q = " FROM messages" + (" WHERE " + " AND ".join(where) if where else "")
+    select = "SELECT id, sender, recipient, type, body, created_at, acked_at" + q + " ORDER BY id"
+    unclean = ""
+    db = open_db(a.db, write=delete and a.yes)
+    try:
+        if delete and a.yes:
+            db.isolation_level = None                   # transactions by hand: BEGIN IMMEDIATE below
+            db.execute("PRAGMA secure_delete = ON")     # zero the deleted rows, do not just mark their space free
+            db.execute("BEGIN IMMEDIATE")               # the server's writes wait (up to its 5 s busy timeout)
+            try:
+                rows = db.execute(select, params).fetchall()
+                db.execute("DELETE" + q, params)
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            # that is not enough: wherever the server rewrote a row (an ack makes it longer, pages split as the table
+            # grows), SQLite left the old copy in the page's free space. VACUUM rebuilds the database from the rows that
+            # are left; the checkpoint copies the result into passnote.db and empties the -wal file, which still holds
+            # the old pages. Both wait (busy timeout) for a read of the server's to finish; a reader that takes over
+            # 10 s leaves the text where it is until this runs again (it then deletes nothing and only cleans up)
+            try:
+                db.execute("VACUUM")
+                if db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]:
+                    unclean = "another program reading the database (a sqlite3 shell, a backup) kept it busy"
+            except sqlite3.OperationalError as e:
+                unclean = str(e)                        # "database is locked" by such a program, a full disk
+        else:
+            rows = db.execute(select, params).fetchall()
+    except sqlite3.Error as e:
+        sys.exit(f"{a.db}: {e}")
+    finally:
+        db.close()
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")       # a body the console cannot show must not end in a traceback
+    w = max([2] + [len(str(r[0])) for r in rows])
+    for i, sender, recipient, typ, body, created_at, acked_at in rows:
+        body = shown(body)
+        print(f"{i:>{w}}  {created_at}  {shown(sender)} -> {shown(recipient)}  {shown(typ)}  "
+              f"{'acked' if acked_at else 'unread'}  {body[:60] + '...' if len(body) > 60 else body}")
+    if not delete:
+        print(f"{len(rows)} message(s)")
+    elif not a.yes:
+        print(f"{len(rows)} message(s) would be deleted; add --yes to delete them" if rows else "no message matches")
+    else:
+        print(f"deleted {len(rows)} message(s)")
+        if unclean:
+            print(f"but passnote.db or its -wal file may still hold the text of deleted messages ({unclean}): run the "
+                  "same command again once that is solved")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -503,6 +607,18 @@ def main():
     st.add_argument("--db", default=os.path.join(HERE, "passnote.db"), help="default: passnote.db next to server.py")
     st.add_argument("--tokens", default=tokens, help="default: tokens.json next to server.py")
     st.add_argument("--json", action="store_true")
+    m = sub.add_parser("messages", help="list messages, or delete them for good (also while the server runs)")
+    ms = m.add_subparsers(dest="action", required=True)
+    for action in ("list", "delete"):
+        q = ms.add_parser(action)
+        q.add_argument("ids", type=int, nargs="*", help="these messages")
+        q.add_argument("--before", type=moment, help="sent before this UTC time: 2026-10-16 or 2026-10-16T08:00:00Z")
+        q.add_argument("--user", help="sent by or to NAME")
+        q.add_argument("--acked", action="store_true", help="only messages their recipient has acked")
+        q.add_argument("--db", default=os.path.join(HERE, "passnote.db"), help="default: passnote.db next to server.py")
+        if action == "delete":
+            q.add_argument("--all", action="store_true", help="every message (instead of ids and the options above)")
+            q.add_argument("--yes", action="store_true", help="delete; without it, only show what would be deleted")
     g = sub.add_parser("gen-token")
     g.add_argument("name")
     a = p.parse_args()
@@ -514,6 +630,8 @@ def main():
         users_cmd(a)
     elif a.cmd == "stats":
         stats(a)
+    elif a.cmd == "messages":
+        messages_cmd(a)
     else:
         serve(a)
 
